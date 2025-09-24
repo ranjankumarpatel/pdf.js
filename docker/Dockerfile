@@ -1,4 +1,4 @@
-FROM node
+FROM node:alpine
 RUN mkdir -p /opt/node
 COPY . /opt/node
 WORKDIR /opt/node

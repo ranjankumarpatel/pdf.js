@@ -2,18 +2,20 @@
   "name": "pdf.js",
   "version": "2.0.0",
   "dependencies": {
-    "express": "^4.18.2"
-  },
-  "devDependencies": {
-    "http-server": "^0.12.3"
+    "express": "^5.1.0",
+    "helmet": "^8.1.0"
   },
   "scripts": {
-    "server": "node server.js",
+    "server1": "node server.js",
+    "server": "http-server build/generic -a 0.0.0.0 -p 8080",
     "server-simple": "http-server build/generic"
   },
   "repository": {
     "type": "git",
     "url": "git://github.com/mozilla/pdf.js.git"
   },
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "http-server": "^14.1.1"
+  }
 }
