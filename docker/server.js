@@ -1,9 +1,19 @@
 const express = require("express");
 const path = require("path");
+const fs = require("fs");
 const helmet = require("helmet");
 
 const app = express();
 const port = process.env.PORT || 8080;
+
+// Single source of truth for build assets. `gulp generic` writes to the repo
+// root build/generic; docker-install.sh copies that into docker/build for the
+// container image. Prefer the canonical root build when present (local dev) so
+// a rebuild is served immediately without a manual copy step, which previously
+// caused API/Worker version skew. Fall back to the local copy (in-container).
+const rootBuild = path.join(__dirname, "..", "build", "generic");
+const localBuild = path.join(__dirname, "build", "generic");
+const buildDir = fs.existsSync(rootBuild) ? rootBuild : localBuild;
 
 // Helmet base config
 app.use(
@@ -41,7 +51,7 @@ app.use((req, res, next) => {
 // version bumps. Use ETag/Last-Modified revalidation instead: the browser
 // always re-checks and gets a fast 304 when nothing changed.
 app.use(
-  express.static(path.join(__dirname, "build", "generic"), {
+  express.static(buildDir, {
     etag: true,
     lastModified: true,
     setHeaders(res) {
@@ -59,5 +69,6 @@ app.get("/", (req, res) => {
 app.listen(port, "0.0.0.0", () => {
   console.log(`PDF.js server running at http://localhost:${port}`);
   console.log(`Viewer available at http://localhost:${port}/web/viewer.html`);
+  console.log(`Serving build assets from: ${buildDir}`);
   console.log("Helmet security headers configured for iframe embedding");
 });
