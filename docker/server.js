@@ -36,10 +36,17 @@ app.use((req, res, next) => {
   next();
 });
 
-// Serve static files
+// Serve static files. Build filenames (e.g. pdf.worker.mjs) are not
+// content-hashed, so long-lived caching would serve stale assets across
+// version bumps. Use ETag/Last-Modified revalidation instead: the browser
+// always re-checks and gets a fast 304 when nothing changed.
 app.use(
   express.static(path.join(__dirname, "build", "generic"), {
-    maxAge: "1y",
+    etag: true,
+    lastModified: true,
+    setHeaders(res) {
+      res.setHeader("Cache-Control", "no-cache");
+    },
   })
 );
 
