@@ -1256,7 +1256,7 @@ function buildGeneric(defines, dir) {
       .pipe(gulp.dest(dir + "web")),
 
     gulp
-      .src("web/compressed.tracemonkey-pldi-09.pdf", { encoding: false })
+      .src("web/sample.pdf", { encoding: false })
       .pipe(gulp.dest(dir + "web")),
   ]);
 }

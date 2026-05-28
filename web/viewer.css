@@ -1478,3 +1478,25 @@ dialog :link {
     display: none;
   }
 }
+
+#viewer {
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  user-select: none;
+}
+
+#toolbarViewerRight {
+  display: none;
+  width: 0;
+}
+
+#editorHighlight,
+#editorFreeText,
+#editorInk,
+#editorStamp,
+#editorSignature,
+#editorModeSeparator,
+#printButton,
+#downloadButton {
+  display: none;
+}

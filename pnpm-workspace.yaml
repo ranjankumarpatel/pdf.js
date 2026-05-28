@@ -1,0 +1,4 @@
+allowBuilds:
+  core-js: true
+  puppeteer: true
+  unrs-resolver: true
