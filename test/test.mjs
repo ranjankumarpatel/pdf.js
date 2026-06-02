@@ -1061,6 +1061,9 @@ async function startBrowser({
       // Disable hardware acceleration (fixes rendering issues, see #15168 and
       // #21272, and environments like GitHub Actions don't expose GPUs anyway).
       "gfx.canvas.accelerated": false,
+      // Disable WebGPU (prevents log spam on Windows, and environments like
+      // GitHub Actions don't expose GPUs anyway).
+      "dom.webgpu.enabled": false,
       // It's helpful to see where the caret is.
       "accessibility.browsewithcaret": true,
       // Disable the newtabpage stuff.
@@ -1148,6 +1151,7 @@ async function startBrowsers({ baseUrl, initializeSession, numSessions = 1 }) {
         })
         .catch(function (ex) {
           console.log(`Error while starting ${browserName}: ${ex.message}`);
+          session.numErrors = 1;
           closeSession(sessionName);
         });
     }
@@ -1395,6 +1399,7 @@ async function main() {
     // because the teardown logic of the tests did not get a chance to run.
     console.error(e);
     await Promise.all(sessions.map(session => closeSession(session.name)));
+    process.exit(1);
   }
 }
 

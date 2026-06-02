@@ -921,7 +921,10 @@
 !operator_list_cycle.pdf
 !knockout_groups_test.pdf
 !issue18032.pdf
+!encrypted-attachment.pdf
 !Embedded_font.pdf
 !issue18548_reduced.pdf
 !issue_cff_unsigned_bbox.pdf
 !90ms_rksj_h_sample.pdf
+!issue21346.pdf
+!cidfont_cmap_overflow.pdf

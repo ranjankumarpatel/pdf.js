@@ -45,20 +45,24 @@ import path from "path";
 
 const __dirname = import.meta.dirname;
 
-async function createPDFDataTransfer(page, filename) {
-  const pdfPath = path.join(__dirname, "../pdfs", filename);
-  const pdfData = fs.readFileSync(pdfPath).toString("base64");
-  return page.evaluateHandle(
-    (data, name) => {
-      const transfer = new DataTransfer();
-      const view = Uint8Array.fromBase64(data);
-      const file = new File([view], name, { type: "application/pdf" });
-      transfer.items.add(file);
-      return transfer;
-    },
-    pdfData,
-    filename
-  );
+async function createPDFDataTransfer(page, ...filenames) {
+  const pdfData = filenames.map(filename => {
+    const pdfPath = path.join(__dirname, "../pdfs", filename);
+    return {
+      data: fs.readFileSync(pdfPath).toString("base64"),
+      filename,
+    };
+  });
+  return page.evaluateHandle(data => {
+    const transfer = new DataTransfer();
+    for (const { data: base64, filename } of data) {
+      const view = Uint8Array.fromBase64(base64);
+      transfer.items.add(
+        new File([view], filename, { type: "application/pdf" })
+      );
+    }
+    return transfer;
+  }, pdfData);
 }
 
 async function waitForThumbnailVisible(page, pageNums) {
@@ -116,6 +120,33 @@ async function waitForHavingContents(page, expected) {
     },
     {},
     expected
+  );
+}
+
+async function waitForPageCanvasToHaveImage(page, pageNumber) {
+  const selector = `.page[data-page-number = "${pageNumber}"] .canvasWrapper canvas`;
+  await page.waitForSelector(selector, { visible: true });
+  await page.waitForFunction(
+    sel => {
+      const canvas = document.querySelector(sel);
+      if (!canvas?.width || !canvas.height) {
+        return false;
+      }
+      const { data } = canvas
+        .getContext("2d", { willReadFrequently: true })
+        .getImageData(0, 0, canvas.width, canvas.height);
+      for (let i = 0, ii = data.length; i < ii; i += 4) {
+        if (
+          data[i + 3] !== 0 &&
+          (data[i] !== 255 || data[i + 1] !== 255 || data[i + 2] !== 255)
+        ) {
+          return true;
+        }
+      }
+      return false;
+    },
+    {},
+    selector
   );
 }
 
@@ -3243,6 +3274,62 @@ describe("Reorganize Pages View", () => {
         })
       );
     });
+
+    it("should merge several PDFs selected at once", async () => {
+      await Promise.all(
+        pages.map(async ([browserName, page]) => {
+          await waitForThumbnailVisible(page, 1);
+
+          // Navigate to page 2 so the merged PDFs are inserted after it.
+          await page.evaluate(() => {
+            window.PDFViewerApplication.page = 2;
+          });
+          await page.waitForFunction(
+            () => window.PDFViewerApplication.page === 2
+          );
+          await waitAndClick(page, getThumbnailSelector(2));
+
+          const handleMerged = await createPromise(page, resolve => {
+            window.PDFViewerApplication.eventBus.on(
+              "thumbnailsloaded",
+              resolve,
+              { once: true }
+            );
+          });
+
+          const picker = await page.$("#viewsManagerAddFilePicker");
+          const pdfPath = path.join(
+            __dirname,
+            "../pdfs/three_pages_with_number.pdf"
+          );
+          // Upload two PDFs in a single picker selection.
+          await picker.uploadFile(pdfPath, pdfPath);
+          await awaitPromise(handleMerged);
+
+          // Original 3 pages + 2 * 3 merged pages = 9 pages total.
+          await page.waitForFunction(
+            () => parseInt(document.getElementById("pageNumber").max, 10) === 9
+          );
+
+          // Focus must move to the first newly inserted page (page 3, since
+          // we merged after page 2).
+          await page.waitForFunction(
+            () => window.PDFViewerApplication.page === 3
+          );
+
+          // Pages 1–2 of the original, then both merged copies (in selection
+          // order), then page 3 of the original shifted to the end.
+          await waitForHavingContents(page, [1, 2, 1, 2, 3, 1, 2, 3, 3]);
+
+          // All 6 newly inserted pages must be selected.
+          await waitForTextToBe(
+            page,
+            "#viewsManagerStatusActionLabel",
+            `${FSI}6${PDI} selected`
+          );
+        })
+      );
+    });
   });
 
   describe("Drag-and-drop PDF merge", () => {
@@ -3372,6 +3459,199 @@ describe("Reorganize Pages View", () => {
             "#viewsManagerStatusActionLabel",
             `${FSI}3${PDI} selected`
           );
+        })
+      );
+    });
+
+    it("should merge several dropped PDFs at once", async () => {
+      await Promise.all(
+        pages.map(async ([browserName, page]) => {
+          await waitForThumbnailVisible(page, [1, 2, 3]);
+
+          const dataTransfer = await createPDFDataTransfer(
+            page,
+            "three_pages_with_number.pdf",
+            "three_pages_with_number.pdf"
+          );
+
+          const handleMerged = await createPromise(page, resolve => {
+            window.PDFViewerApplication.eventBus.on(
+              "thumbnailsloaded",
+              resolve,
+              { once: true }
+            );
+          });
+          const filesLength = await page.evaluate(
+            (transfer, selector) => {
+              const target = document.querySelector(selector);
+              const { left, top, width, height } =
+                target.getBoundingClientRect();
+              const clientX = left + width / 4;
+              const clientY = top + (3 * height) / 4;
+              for (const type of ["dragenter", "dragover", "drop"]) {
+                target.dispatchEvent(
+                  new DragEvent(type, {
+                    bubbles: true,
+                    cancelable: true,
+                    clientX,
+                    clientY,
+                    dataTransfer: transfer,
+                  })
+                );
+              }
+              return transfer.files.length;
+            },
+            dataTransfer,
+            getThumbnailSelector(2)
+          );
+          expect(filesLength).withContext(`In ${browserName}`).toBe(2);
+          await awaitPromise(handleMerged);
+
+          await page.waitForFunction(
+            () => parseInt(document.getElementById("pageNumber").max, 10) === 9
+          );
+          await page.waitForFunction(
+            () => window.PDFViewerApplication.page === 3
+          );
+          await waitForHavingContents(page, [1, 2, 1, 2, 3, 1, 2, 3, 3]);
+          await waitForTextToBe(
+            page,
+            "#viewsManagerStatusActionLabel",
+            `${FSI}6${PDI} selected`
+          );
+        })
+      );
+    });
+  });
+
+  describe("Add image as page", () => {
+    let pages;
+
+    beforeEach(async () => {
+      pages = await loadAndWait(
+        "three_pages_with_number.pdf",
+        '.page[data-page-number = "1"] .endOfContent',
+        "1",
+        null,
+        { enableSplitMerge: true, enableMerge: true }
+      );
+    });
+
+    afterEach(async () => {
+      await closePages(pages);
+    });
+
+    it("should insert an image as a new page after the current page", async () => {
+      await Promise.all(
+        pages.map(async ([browserName, page]) => {
+          await waitForThumbnailVisible(page, 1);
+
+          // Navigate to page 2 so the image is inserted after it.
+          await page.evaluate(() => {
+            window.PDFViewerApplication.page = 2;
+          });
+          await page.waitForFunction(
+            () => window.PDFViewerApplication.page === 2
+          );
+          await waitAndClick(page, getThumbnailSelector(2));
+
+          const handleMerged = await createPromise(page, resolve => {
+            window.PDFViewerApplication.eventBus.on(
+              "thumbnailsloaded",
+              resolve,
+              { once: true }
+            );
+          });
+
+          const picker = await page.$("#viewsManagerAddFilePicker");
+          await picker.uploadFile(
+            path.join(__dirname, "../images/firefox_logo.png")
+          );
+          await awaitPromise(handleMerged);
+
+          // 3 original pages + 1 inserted image page = 4 pages total.
+          await page.waitForFunction(
+            () => parseInt(document.getElementById("pageNumber").max, 10) === 4
+          );
+
+          // Focus must move to the newly inserted page (page 3, since the
+          // image was inserted after page 2).
+          await page.waitForFunction(
+            () => window.PDFViewerApplication.page === 3
+          );
+          await waitForPageCanvasToHaveImage(page, 3);
+
+          // The original text pages must keep their content: pages 1–2 from
+          // the original, then the image page (no text), then page 3 of the
+          // original shifted to position 4. The viewer only renders pages that
+          // are visible, so force all pages into the viewport (WRAPPED scroll
+          // mode + minimum scale) to ensure their text layers render before we
+          // inspect them; otherwise a page outside the viewport (e.g. page 2
+          // when the current page is 3) may not have rendered yet.
+          const expectedTexts = ["1", "2", "", "3"];
+          await page.evaluate(() => {
+            window.PDFViewerApplication.pdfViewer.scrollMode = 2; /* = ScrollMode.WRAPPED = */
+            window.PDFViewerApplication.pdfViewer.updateScale({
+              drawingDelay: 0,
+              scaleFactor: 0.01,
+            });
+          });
+          await page.waitForFunction(
+            expected => {
+              const layers = document.querySelectorAll(".page .textLayer");
+              if (layers.length !== expected.length) {
+                return false;
+              }
+              return Array.from(layers).every((tl, i) => {
+                const _page = tl.closest(".page");
+                return (
+                  _page?.getAttribute("data-page-number") === String(i + 1) &&
+                  tl.textContent.trim() === expected[i]
+                );
+              });
+            },
+            {},
+            expectedTexts
+          );
+
+          const hasChanges = await page.evaluate(() =>
+            window.PDFViewerApplication._hasChanges()
+          );
+          expect(hasChanges).withContext(`In ${browserName}`).toBeTrue();
+        })
+      );
+    });
+
+    it("should insert an SVG image as a new page", async () => {
+      await Promise.all(
+        pages.map(async ([browserName, page]) => {
+          await waitForThumbnailVisible(page, 1);
+
+          const handleMerged = await createPromise(page, resolve => {
+            window.PDFViewerApplication.eventBus.on(
+              "thumbnailsloaded",
+              resolve,
+              { once: true }
+            );
+          });
+
+          const picker = await page.$("#viewsManagerAddFilePicker");
+          await picker.uploadFile(
+            path.join(__dirname, "../images/firefox_logo.svg")
+          );
+          await awaitPromise(handleMerged);
+
+          // The SVG must be rasterized and inserted as a new page, bringing
+          // the document to 4 pages.
+          await page.waitForFunction(
+            () => parseInt(document.getElementById("pageNumber").max, 10) === 4
+          );
+          await waitForPageCanvasToHaveImage(page, 2);
+
+          const hasChanges = await page.evaluate(() =>
+            window.PDFViewerApplication._hasChanges()
+          );
+          expect(hasChanges).withContext(`In ${browserName}`).toBeTrue();
         })
       );
     });

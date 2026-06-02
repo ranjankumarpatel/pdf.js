@@ -116,6 +116,7 @@ const DEFINES = Object.freeze({
   WORKER_THREAD: false,
   TESTING: undefined,
   COVERAGE: undefined,
+  INTERNAL_EVT: crypto.randomUUID(),
   // The main build targets:
   GENERIC: false,
   MOZCENTRAL: false,
@@ -174,9 +175,7 @@ function startNode(args, options) {
   // (such as `issue6360.pdf`), so we need to restore this value. Note that
   // this argument needs to be before all other arguments as it needs to be
   // passed to the Node.js process itself and not to the script that it runs.
-  // Increase the max heap size to avoid OOM caused by a Puppeteer/BiDi memory
-  // leak: https://github.com/puppeteer/puppeteer/issues/14876
-  args.unshift("--max-http-header-size=80000", "--max-old-space-size=8192");
+  args.unshift("--max-http-header-size=80000");
   return spawn("node", args, options);
 }
 

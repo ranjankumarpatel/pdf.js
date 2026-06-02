@@ -67,11 +67,24 @@ async function writeStream(stream, buffer, transform) {
     : filter;
   const isFilterZeroFlateDecode = isName(filterZero, "FlateDecode");
 
+  // These filters already compress the data, so we shouldn't try to compress it
+  // again.
+  const isFilterZeroImageDecode =
+    isName(filterZero, "DCTDecode") ||
+    isName(filterZero, "JPXDecode") ||
+    isName(filterZero, "JBIG2Decode") ||
+    isName(filterZero, "CCITTFaxDecode") ||
+    isName(filterZero, "LZWDecode");
+
   // If the string is too small there is no real benefit in compressing it.
   // The number 256 is arbitrary, but it should be reasonable.
   const MIN_LENGTH_FOR_COMPRESSING = 256;
 
-  if (bytes.length >= MIN_LENGTH_FOR_COMPRESSING && !isFilterZeroFlateDecode) {
+  if (
+    !isFilterZeroFlateDecode &&
+    !isFilterZeroImageDecode &&
+    bytes.length >= MIN_LENGTH_FOR_COMPRESSING
+  ) {
     try {
       const cs = new CompressionStream("deflate");
       const writer = cs.writable.getWriter();
@@ -275,8 +288,7 @@ function updateXFA({ xfaData, xfaDatasetsRef, changes, xref }) {
     const datasets = xref.fetchIfRef(xfaDatasetsRef);
     xfaData = writeXFADataForAcroform(datasets.getString(), changes);
   }
-  const xfaDataStream = new StringStream(xfaData);
-  xfaDataStream.dict = new Dict(xref);
+  const xfaDataStream = new StringStream(xfaData, new Dict(xref));
   xfaDataStream.dict.setIfName("Type", "EmbeddedFile");
 
   changes.put(xfaDatasetsRef, {

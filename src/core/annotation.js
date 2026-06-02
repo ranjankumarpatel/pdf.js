@@ -25,7 +25,6 @@ import {
   BASELINE_FACTOR,
   BBOX_INIT,
   F32_BBOX_INIT,
-  FeatureTest,
   info,
   isArrayEqual,
   LINE_DESCENT_FACTOR,
@@ -62,7 +61,6 @@ import {
 } from "./default_appearance.js";
 import { DateFormats, TimeFormats } from "../shared/scripting_utils.js";
 import { Dict, isName, isRefsEqual, Name, Ref, RefSet } from "./primitives.js";
-import { Stream, StringStream } from "./stream.js";
 import {
   stringToAsciiOrUTF16BE,
   stringToPDFString,
@@ -72,11 +70,13 @@ import { BaseStream } from "./base_stream.js";
 import { bidi } from "./bidi.js";
 import { Catalog } from "./catalog.js";
 import { ColorSpaceUtils } from "./colorspace_utils.js";
+import { createImage } from "./editor/pdf_images.js";
 import { FileSpec } from "./file_spec.js";
 import { JpegStream } from "./jpeg_stream.js";
 import { ObjectLoader } from "./object_loader.js";
 import { OperatorList } from "./operator_list.js";
 import { parseMarkedContentProps } from "./evaluator_utils.js";
+import { StringStream } from "./stream.js";
 import { XFAFactory } from "./xfa/factory.js";
 
 class AnnotationFactory {
@@ -351,7 +351,7 @@ class AnnotationFactory {
         continue;
       }
       imagePromises ||= new Map();
-      imagePromises.set(bitmapId, StampAnnotation.createImage(bitmap, xref));
+      imagePromises.set(bitmapId, createImage(bitmap, xref));
     }
 
     return imagePromises;
@@ -427,7 +427,10 @@ class AnnotationFactory {
             changes.put(imageRef, {
               data: imageStream,
             });
-            image.imageStream = image.smaskStream = null;
+            image.imageStream = null;
+            image.imageRenderStream = null;
+            image.smaskStream = null;
+            image.smaskRenderStream = null;
           }
           promises.push(
             StampAnnotation.createNewAnnotation(xref, annotation, changes, {
@@ -522,12 +525,23 @@ class AnnotationFactory {
             ? await imagePromises?.get(annotation.bitmapId)
             : null;
           if (image?.imageStream) {
-            const { imageStream, smaskStream } = image;
-            if (smaskStream) {
-              imageStream.dict.set("SMask", smaskStream);
+            const {
+              imageStream,
+              imageRenderStream,
+              smaskStream,
+              smaskRenderStream,
+            } = image;
+            const imageRef =
+              imageRenderStream ||
+              new JpegStream(imageStream, imageStream.length);
+            if (smaskStream || smaskRenderStream) {
+              imageRef.dict.set("SMask", smaskRenderStream || smaskStream);
             }
-            image.imageRef = new JpegStream(imageStream, imageStream.length);
-            image.imageStream = image.smaskStream = null;
+            image.imageRef = imageRef;
+            image.imageStream = null;
+            image.imageRenderStream = null;
+            image.smaskStream = null;
+            image.smaskRenderStream = null;
           }
           promises.push(
             StampAnnotation.createNewPrintAnnotation(
@@ -1218,8 +1232,7 @@ class Annotation {
           separateCanvas: false,
         };
       }
-      appearance = new StringStream("");
-      appearance.dict = new Dict();
+      appearance = new StringStream("", new Dict());
     }
 
     const appearanceDict = appearance.dict;
@@ -1768,8 +1781,10 @@ class MarkupAnnotation extends Annotation {
     const appearanceStreamDict = new Dict(xref);
     appearanceStreamDict.setIfName("Subtype", "Form");
 
-    const appearanceStream = new StringStream(buffer.join(" "));
-    appearanceStream.dict = appearanceStreamDict;
+    const appearanceStream = new StringStream(
+      buffer.join(" "),
+      appearanceStreamDict
+    );
     formDict.set("Fm0", appearanceStream);
 
     const gsDict = new Dict(xref);
@@ -1790,8 +1805,7 @@ class MarkupAnnotation extends Annotation {
     appearanceDict.set("Resources", resources);
     appearanceDict.set("BBox", bbox);
 
-    this.appearance = new StringStream("/GS0 gs /Fm0 Do");
-    this.appearance.dict = appearanceDict;
+    this.appearance = new StringStream("/GS0 gs /Fm0 Do", appearanceDict);
 
     // This method is only called if there is no appearance for the annotation,
     // so `this.appearance` is not pushed yet in the `Annotation` constructor.
@@ -2278,9 +2292,8 @@ class WidgetAnnotation extends Annotation {
       dict.set("AP", AP);
       AP.set("N", newRef);
 
-      const resources = this._getSaveFieldResources(xref);
-      const appearanceStream = new StringStream(appearance);
-      const appearanceDict = (appearanceStream.dict = new Dict(xref));
+      const resources = this._getSaveFieldResources(xref),
+        appearanceDict = new Dict(xref);
       appearanceDict.setIfName("Subtype", "Form");
       appearanceDict.set("Resources", resources);
       const bbox =
@@ -2288,6 +2301,8 @@ class WidgetAnnotation extends Annotation {
           ? [0, 0, this.width, this.height]
           : [0, 0, this.height, this.width];
       appearanceDict.set("BBox", bbox);
+
+      const appearanceStream = new StringStream(appearance, appearanceDict);
 
       const rotationMatrix = this.getRotationMatrix(annotationStorage);
       if (rotationMatrix !== IDENTITY_MATRIX) {
@@ -3388,8 +3403,7 @@ class ButtonWidgetAnnotation extends WidgetAnnotation {
 
     appearanceStreamDict.set("Resources", resources);
 
-    this.checkedAppearance = new StringStream(appearance);
-    this.checkedAppearance.dict = appearanceStreamDict;
+    this.checkedAppearance = new StringStream(appearance, appearanceStreamDict);
 
     this._streams.push(this.checkedAppearance);
   }
@@ -4239,10 +4253,7 @@ class FreeTextAnnotation extends MarkupAnnotation {
     appearanceStreamDict.set("Resources", resources);
     appearanceStreamDict.set("Matrix", [1, 0, 0, 1, -rect[0], -rect[1]]);
 
-    const ap = new StringStream(appearance);
-    ap.dict = appearanceStreamDict;
-
-    return ap;
+    return new StringStream(appearance, appearanceStreamDict);
   }
 }
 
@@ -4731,10 +4742,7 @@ class InkAnnotation extends MarkupAnnotation {
       appearanceStreamDict.set("Resources", resources);
     }
 
-    const ap = new StringStream(appearance);
-    ap.dict = appearanceStreamDict;
-
-    return ap;
+    return new StringStream(appearance, appearanceStreamDict);
   }
 
   static async createNewAppearanceStreamForHighlight(annotation, xref, params) {
@@ -4792,10 +4800,7 @@ class InkAnnotation extends MarkupAnnotation {
       r0.setIfName("Type", "ExtGState");
     }
 
-    const ap = new StringStream(appearance);
-    ap.dict = appearanceStreamDict;
-
-    return ap;
+    return new StringStream(appearance, appearanceStreamDict);
   }
 }
 
@@ -4935,10 +4940,7 @@ class HighlightAnnotation extends MarkupAnnotation {
       r0.setIfName("Type", "ExtGState");
     }
 
-    const ap = new StringStream(appearance);
-    ap.dict = appearanceStreamDict;
-
-    return ap;
+    return new StringStream(appearance, appearanceStreamDict);
   }
 }
 
@@ -5097,82 +5099,6 @@ class StampAnnotation extends MarkupAnnotation {
     return !modifiedIds?.has(this.data.id);
   }
 
-  static async createImage(bitmap, xref) {
-    // TODO: when printing, we could have a specific internal colorspace
-    // (e.g. something like DeviceRGBA) in order avoid any conversion (i.e. no
-    // jpeg, no rgba to rgb conversion, etc...)
-
-    const { width, height } = bitmap;
-    const canvas = new OffscreenCanvas(width, height);
-    const ctx = canvas.getContext("2d", { alpha: true });
-
-    // Draw the image and get the data in order to extract the transparency.
-    ctx.drawImage(bitmap, 0, 0);
-    const data = ctx.getImageData(0, 0, width, height).data;
-    const buf32 = new Uint32Array(data.buffer);
-    const hasAlpha = buf32.some(
-      FeatureTest.isLittleEndian
-        ? x => x >>> 24 !== 0xff
-        : x => (x & 0xff) !== 0xff
-    );
-
-    if (hasAlpha) {
-      // Redraw the image on a white background in order to remove the thin gray
-      // line which can appear when exporting to jpeg.
-      ctx.fillStyle = "white";
-      ctx.fillRect(0, 0, width, height);
-      ctx.drawImage(bitmap, 0, 0);
-    }
-
-    const jpegBytesPromise = canvas
-      .convertToBlob({ type: "image/jpeg", quality: 1 })
-      .then(blob => blob.bytes());
-
-    const xobjectName = Name.get("XObject");
-    const imageName = Name.get("Image");
-    const image = new Dict(xref);
-    image.set("Type", xobjectName);
-    image.set("Subtype", imageName);
-    image.set("BitsPerComponent", 8);
-    image.setIfName("ColorSpace", "DeviceRGB");
-    image.setIfName("Filter", "DCTDecode");
-    image.set("BBox", [0, 0, width, height]);
-    image.set("Width", width);
-    image.set("Height", height);
-
-    let smaskStream = null;
-    if (hasAlpha) {
-      const alphaBuffer = new Uint8Array(buf32.length);
-      if (FeatureTest.isLittleEndian) {
-        for (let i = 0, ii = buf32.length; i < ii; i++) {
-          alphaBuffer[i] = buf32[i] >>> 24;
-        }
-      } else {
-        for (let i = 0, ii = buf32.length; i < ii; i++) {
-          alphaBuffer[i] = buf32[i] & 0xff;
-        }
-      }
-
-      const smask = new Dict(xref);
-      smask.set("Type", xobjectName);
-      smask.set("Subtype", imageName);
-      smask.set("BitsPerComponent", 8);
-      smask.setIfName("ColorSpace", "DeviceGray");
-      smask.set("Width", width);
-      smask.set("Height", height);
-
-      smaskStream = new Stream(alphaBuffer, 0, 0, smask);
-    }
-    const imageStream = new Stream(await jpegBytesPromise, 0, 0, image);
-
-    return {
-      imageStream,
-      smaskStream,
-      width,
-      height,
-    };
-  }
-
   static createNewDict(annotation, xref, { apRef, ap }) {
     const { date, oldAnnotation, rect, rotation, user } = annotation;
     const stamp = oldAnnotation || new Dict(xref);
@@ -5241,10 +5167,7 @@ class StampAnnotation extends MarkupAnnotation {
     appearanceStreamDict.set("BBox", rect);
     appearanceStreamDict.set("Length", appearance.length);
 
-    const ap = new StringStream(appearance);
-    ap.dict = appearanceStreamDict;
-
-    return ap;
+    return new StringStream(appearance, appearanceStreamDict);
   }
 
   static async createNewAppearanceStream(annotation, xref, params) {
@@ -5276,10 +5199,7 @@ class StampAnnotation extends MarkupAnnotation {
       appearanceStreamDict.set("Matrix", matrix);
     }
 
-    const ap = new StringStream(appearance);
-    ap.dict = appearanceStreamDict;
-
-    return ap;
+    return new StringStream(appearance, appearanceStreamDict);
   }
 }
 
