@@ -47,7 +47,7 @@
     "metalsmith-html-relative": "^2.0.12",
     "ordered-read-streams": "^2.0.0",
     "pngjs": "^7.0.0",
-    "postcss": "^8.5.15",
+    "postcss": "^8.5.25",
     "postcss-discard-comments": "^8.0.0",
     "postcss-values-parser": "^8.0.0",
     "prettier": "^3.8.3",
