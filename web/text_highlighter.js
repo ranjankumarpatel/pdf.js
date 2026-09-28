@@ -20,7 +20,7 @@ import { internalOpt } from "./internal_evt.js";
 /** @typedef {import("./pdf_find_controller").PDFFindController} PDFFindController */
 
 /**
- * @typedef {Object} TextHighlighterOptions
+ * @typedef {object} TextHighlighterOptions
  * @property {PDFFindController} findController
  * @property {EventBus} eventBus - The application event bus.
  * @property {number} pageIndex - The page index.
@@ -51,7 +51,6 @@ class TextHighlighter {
    * The arrays should be of equal length and the array element at each index
    * should correspond to the other. e.g.
    * `items[0] = "<span>Item 0</span>" and texts[0] = "Item 0";
-   *
    * @param {Array<Node>} divs
    * @param {Array<string>} texts
    */
@@ -196,10 +195,7 @@ class TextHighlighter {
         span.append(node);
         div.append(span);
 
-        if (className.includes("selected")) {
-          return span;
-        }
-        return null;
+        return className.includes("selected") ? span : null;
       }
 
       div.append(node);

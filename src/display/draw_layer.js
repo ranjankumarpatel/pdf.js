@@ -19,9 +19,9 @@ import { shadow } from "../shared/util.js";
 /**
  * @typedef DrawLayerOptions
  *   Configuration for {@linkcode DrawLayer}.
- * @property {Object | null} [filterFactory]
+ * @property {object | null} [filterFactory]
  *   Filter factory used to style selections (optional).
- * @property {Object | null} [pageColors]
+ * @property {object | null} [pageColors]
  *   Page foreground/background colors for HCM (optional).
  * @property {number} pageIndex
  *   Zero-based page index.
@@ -80,7 +80,6 @@ import { shadow } from "../shared/util.js";
 
 /**
  * Compare the document position of two text layers.
- *
  * @param {Element} a
  *   Text layer.
  * @param {Element} b
@@ -99,7 +98,6 @@ function compareTextLayers(a, b) {
 
 /**
  * Find the closest text layer upwards.
- *
  * @param {Node | null} node
  *   Node.
  * @returns {Element | null}
@@ -109,15 +107,13 @@ function getTextLayer(node) {
   if (!node) {
     return null;
   }
-  if (node.nodeType === Node.ELEMENT_NODE) {
-    return node.closest(".textLayer");
-  }
-  return node.parentElement?.closest(".textLayer") || null;
+  return node.nodeType === Node.ELEMENT_NODE
+    ? node.closest(".textLayer")
+    : node.parentElement?.closest(".textLayer") || null;
 }
 
 /**
  * Compare the position of two points in the document order.
- *
  * @param {Node} nodeA
  *   Node.
  * @param {number} offsetA
@@ -135,6 +131,7 @@ function isPointBefore(nodeA, offsetA, nodeB, offsetB) {
     return offsetA <= offsetB;
   }
   const relation = nodeA.compareDocumentPosition(nodeB);
+  /* eslint-disable unicorn/prefer-ternary */
   if (relation & Node.DOCUMENT_POSITION_FOLLOWING) {
     return true;
   }
@@ -142,6 +139,7 @@ function isPointBefore(nodeA, offsetA, nodeB, offsetB) {
     return false;
   }
   return null;
+  /* eslint-enable unicorn/prefer-ternary */
 }
 
 /**
@@ -150,7 +148,6 @@ function isPointBefore(nodeA, offsetA, nodeB, offsetB) {
  * In that case, we want to move it to the last valid position within
  * the text layer, which can be either the end of the last text node or the end
  * of the last text node before the endOfContent element if it exists.
- *
  * @param {Node} container
  *   Container.
  * @param {number} offset
@@ -178,10 +175,9 @@ function normalizeEdgeBoundary(container, offset, textLayer) {
   if (!lastNode || !textLayer.contains(lastNode)) {
     return null;
   }
-  if (lastNode.nodeType === Node.TEXT_NODE) {
-    return { container: lastNode, offset: lastNode.textContent.length };
-  }
-  return { container: lastNode, offset: lastNode.childNodes.length };
+  return lastNode.nodeType === Node.TEXT_NODE
+    ? { container: lastNode, offset: lastNode.textContent.length }
+    : { container: lastNode, offset: lastNode.childNodes.length };
 }
 
 /**
@@ -197,10 +193,10 @@ class DrawLayer {
   /** @type {Element | null} */
   #textLayer = null;
 
-  /** @type {Object | null} */
+  /** @type {object | null} */
   #filterFactory = null;
 
-  /** @type {Object | null} */
+  /** @type {object | null} */
   #pageColors = null;
 
   /** @type {MutationObserver | null} */
@@ -230,8 +226,6 @@ class DrawLayer {
   /**
    * @param {DrawLayerOptions} options
    *   Configuration.
-   * @returns
-   *   Instance.
    */
   constructor({
     filterFactory = null,
@@ -335,7 +329,6 @@ class DrawLayer {
 
   /**
    * Clean up the selection for a text layer.
-   *
    * @param {Element} textLayer
    *   Text layer.
    * @returns {undefined}
@@ -366,8 +359,10 @@ class DrawLayer {
    *   Connected text layers sorted in document order.
    */
   static #getOrderedTextLayers() {
-    return [...this.#textLayerSet]
+    return this.#textLayerSet
+      .keys()
       .filter(textLayer => textLayer.isConnected)
+      .toArray()
       .sort(compareTextLayers);
   }
 
@@ -376,7 +371,6 @@ class DrawLayer {
    * We want to display the selection in a separate layer on top of the text
    * layer because the text layer has `mix-blend-mode: multiply` and we want
    * the selection to have a different blend mode.
-   *
    * @returns {undefined}
    *   Nothing.
    */
@@ -639,7 +633,8 @@ class DrawLayer {
         textLayerData.selectionDiv = div;
       }
 
-      if (!div.parentNode && drawLayer.#parent) {
+      if (drawLayer.#parent && div.parentNode !== drawLayer.#parent) {
+        // The div can still be in a canvas wrapper which has been removed.
         drawLayer.#parent.append(div);
         this.#selections.add(div);
       }

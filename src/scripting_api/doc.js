@@ -14,7 +14,7 @@
  */
 
 import { makeArr, makeMap, serializeError } from "./app_utils.js";
-import { createActionsMap } from "./common.js";
+import { createMap } from "./common.js";
 import { PDFObject } from "./pdf_object.js";
 import { PrintParams } from "./print_params.js";
 import { ZoomType } from "./constants.js";
@@ -98,7 +98,7 @@ class Doc extends PDFObject {
 
     this._zoomType = ZoomType.none;
     this._zoom = data.zoom || 100;
-    this._actions = createActionsMap(data.actions);
+    this._actions = createMap(data.actions);
     this._globalEval = data.globalEval;
     this._userActivation = false;
     this._disablePrinting = false;
@@ -173,9 +173,9 @@ class Doc extends PDFObject {
   _dispatchPageEvent(name, actions, pageNumber) {
     if (name === "PageOpen") {
       this.#pageActions ??= new Map();
-      if (!this.#pageActions.has(pageNumber)) {
-        this.#pageActions.set(pageNumber, createActionsMap(actions));
-      }
+      this.#pageActions.getOrInsertComputed(pageNumber, () =>
+        createMap(actions)
+      );
       this._pageNum = pageNumber - 1;
     }
 
@@ -964,10 +964,7 @@ class Doc extends PDFObject {
 
   getField(cName) {
     const field = this._getField(cName);
-    if (!field) {
-      return null;
-    }
-    return field.wrapped;
+    return !field ? null : field.wrapped;
   }
 
   _getChildren(fieldName) {
@@ -1024,10 +1021,9 @@ class Doc extends PDFObject {
     if (typeof nIndex !== "number") {
       throw new TypeError("Invalid field index: must be a number");
     }
-    if (0 <= nIndex && nIndex < this.numFields) {
-      return this._fieldNames[Math.trunc(nIndex)];
-    }
-    return null;
+    return nIndex >= 0 && nIndex < this.numFields
+      ? this._fieldNames[Math.trunc(nIndex)]
+      : null;
   }
 
   getNthTemplate() {

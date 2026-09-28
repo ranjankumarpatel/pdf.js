@@ -17,7 +17,7 @@
 /** @typedef {import("./event_utils").EventBus} EventBus */
 /** @typedef {import("./pdf_link_service.js").PDFLinkService} PDFLinkService */
 
-import { getCharacterType, getNormalizeWithNFKC } from "./pdf_find_utils.js";
+import { getNormalizeWithNFKC, isEntireWord } from "./pdf_find_utils.js";
 import { binarySearchFirstItem } from "./ui_utils.js";
 import { internalOpt } from "./internal_evt.js";
 
@@ -28,20 +28,20 @@ const FindState = {
   PENDING: 3,
 };
 
-const CHARACTERS_TO_NORMALIZE = {
-  "\u2010": "-", // Hyphen
-  "\u2018": "'", // Left single quotation mark
-  "\u2019": "'", // Right single quotation mark
-  "\u201A": "'", // Single low-9 quotation mark
-  "\u201B": "'", // Single high-reversed-9 quotation mark
-  "\u201C": '"', // Left double quotation mark
-  "\u201D": '"', // Right double quotation mark
-  "\u201E": '"', // Double low-9 quotation mark
-  "\u201F": '"', // Double high-reversed-9 quotation mark
-  "\u00BC": "1/4", // Vulgar fraction one quarter
-  "\u00BD": "1/2", // Vulgar fraction one half
-  "\u00BE": "3/4", // Vulgar fraction three quarters
-};
+const CHARACTERS_TO_NORMALIZE = new Map([
+  ["\u2010", "-"], // Hyphen
+  ["\u2018", "'"], // Left single quotation mark
+  ["\u2019", "'"], // Right single quotation mark
+  ["\u201A", "'"], // Single low-9 quotation mark
+  ["\u201B", "'"], // Single high-reversed-9 quotation mark
+  ["\u201C", '"'], // Left double quotation mark
+  ["\u201D", '"'], // Right double quotation mark
+  ["\u201E", '"'], // Double low-9 quotation mark
+  ["\u201F", '"'], // Double high-reversed-9 quotation mark
+  ["\u00BC", "1/4"], // Vulgar fraction one quarter
+  ["\u00BD", "1/2"], // Vulgar fraction one half
+  ["\u00BE", "3/4"], // Vulgar fraction three quarters
+]);
 
 // These diacritics aren't considered as combining diacritics
 // when searching in a document:
@@ -76,8 +76,6 @@ let DIACRITICS_EXCEPTION_STR; // Lazily initialized, see below.
 
 const DIACRITICS_REG_EXP = /\p{M}+/gu;
 const SPECIAL_CHARS_REG_EXP = /([+^$|])|(\p{P}+)|(\s+)|(\p{M})|(\p{L})/gu;
-const NOT_DIACRITIC_FROM_END_REG_EXP = /(\P{M})\p{M}*$/u;
-const NOT_DIACRITIC_FROM_START_REG_EXP = /^\p{M}*(\P{M})/u;
 
 // The range [AC00-D7AF] corresponds to the Hangul syllables.
 // The few other chars are some CJK Compatibility Ideographs.
@@ -123,7 +121,7 @@ function normalize(text, options = {}) {
     normalizationRegex = withSyllablesRegExp;
   } else {
     // Compile the regular expression for text normalization once.
-    const replace = Object.keys(CHARACTERS_TO_NORMALIZE).join("");
+    const replace = CHARACTERS_TO_NORMALIZE.keys().join("");
     const toNormalizeWithNFKC = getNormalizeWithNFKC();
 
     // 3040-309F: Hiragana
@@ -208,7 +206,7 @@ function normalize(text, options = {}) {
       i -= shiftOrigin;
       if (p1) {
         // Maybe fractions or quotations mark...
-        const replacement = CHARACTERS_TO_NORMALIZE[p1];
+        const replacement = CHARACTERS_TO_NORMALIZE.get(p1);
         const jj = replacement.length;
         for (let j = 1; j < jj; j++) {
           positions.push(i - shift + j, shift - j);
@@ -219,11 +217,10 @@ function normalize(text, options = {}) {
 
       if (p2) {
         // Use the NFKC representation to normalize the char.
-        let replacement = NFKC_CHARS_TO_NORMALIZE.get(p2);
-        if (!replacement) {
-          replacement = p2.normalize("NFKC");
-          NFKC_CHARS_TO_NORMALIZE.set(p2, replacement);
-        }
+        const replacement = NFKC_CHARS_TO_NORMALIZE.getOrInsertComputed(
+          p2,
+          () => p2.normalize("NFKC")
+        );
         const jj = replacement.length;
         for (let j = 1; j < jj; j++) {
           positions.push(i - shift + j, shift - j);
@@ -402,7 +399,7 @@ function getOriginalIndex(diffs, pos, len) {
 }
 
 /**
- * @typedef {Object} PDFFindControllerOptions
+ * @typedef {object} PDFFindControllerOptions
  * @property {PDFLinkService} linkService - The navigation/linking service.
  * @property {EventBus} eventBus - The application event bus.
  * @property {number} [delay] - The number of milliseconds to delay execution of
@@ -446,7 +443,7 @@ class PDFFindController {
 
     /**
      * Callback used to check if a `pageNumber` is currently visible.
-     * @type {function}
+     * @type {Function}
      */
     this.onIsPageVisible = null;
 
@@ -479,7 +476,6 @@ class PDFFindController {
   /**
    * Set a reference to the PDF document in order to search it.
    * Note that searching is not possible if this method is not called.
-   *
    * @param {PDFDocumentProxy} pdfDocument - The PDF document to search.
    */
   setDocument(pdfDocument) {
@@ -561,7 +557,7 @@ class PDFFindController {
   }
 
   /**
-   * @typedef {Object} PDFFindControllerScrollMatchIntoViewParams
+   * @typedef {object} PDFFindControllerScrollMatchIntoViewParams
    * @property {HTMLElement} element
    * @property {number} pageIndex
    * @property {number} matchIndex
@@ -569,7 +565,7 @@ class PDFFindController {
 
   /**
    * Scroll the current match into view.
-   * @param {PDFFindControllerScrollMatchIntoViewParams}
+   * @param {PDFFindControllerScrollMatchIntoViewParams} params
    */
   scrollMatchIntoView({ element = null, pageIndex = -1, matchIndex = -1 }) {
     if (!this._scrollMatches || !element) {
@@ -632,7 +628,7 @@ class PDFFindController {
     }
     // We don't bother caching the normalized search query in the Array-case,
     // since this code-path is *essentially* unused in the default viewer.
-    return (query || []).filter(q => !!q).map(q => normalize(q)[0]);
+    return (query || []).filter(Boolean).map(q => normalize(q)[0]);
   }
 
   #shouldDirtyMatch(state) {
@@ -680,36 +676,6 @@ class PDFFindController {
     return true;
   }
 
-  /**
-   * Determine if the search query constitutes a "whole word", by comparing the
-   * first/last character type with the preceding/following character type.
-   */
-  #isEntireWord(content, startIdx, length) {
-    let match = content
-      .slice(0, startIdx)
-      .match(NOT_DIACRITIC_FROM_END_REG_EXP);
-    if (match) {
-      const first = content.charCodeAt(startIdx);
-      const limit = match[1].charCodeAt(0);
-      if (getCharacterType(first) === getCharacterType(limit)) {
-        return false;
-      }
-    }
-
-    match = content
-      .slice(startIdx + length)
-      .match(NOT_DIACRITIC_FROM_START_REG_EXP);
-    if (match) {
-      const last = content.charCodeAt(startIdx + length - 1);
-      const limit = match[1].charCodeAt(0);
-      if (getCharacterType(last) === getCharacterType(limit)) {
-        return false;
-      }
-    }
-
-    return true;
-  }
-
   #convertToRegExpString(query, hasDiacritics) {
     const { matchDiacritics } = this.#state;
     let isUnicode = false;
@@ -720,10 +686,7 @@ class PDFFindController {
       if (query.startsWith(original)) {
         return `${fixed}[ ]*`;
       }
-      if (query.endsWith(original)) {
-        return `[ ]*${fixed}`;
-      }
-      return `[ ]*${fixed}[ ]*`;
+      return query.endsWith(original) ? `[ ]*${fixed}` : `[ ]*${fixed}[ ]*`;
     };
     query = query.replaceAll(
       SPECIAL_CHARS_REG_EXP,
@@ -840,7 +803,7 @@ class PDFFindController {
   }
 
   /**
-   * @typedef {Object} FindMatch
+   * @typedef {object} FindMatch
    * @property {number} index - The start of the matched text in the page's
    *   string contents.
    * @property {number} length - The length of the matched text.
@@ -890,7 +853,7 @@ class PDFFindController {
     while ((match = query.exec(pageContent)) !== null) {
       if (
         entireWord &&
-        !this.#isEntireWord(pageContent, match.index, match[0].length)
+        !isEntireWord(pageContent, match.index, match[0].length)
       ) {
         continue;
       }

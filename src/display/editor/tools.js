@@ -23,6 +23,7 @@ import {
   AnnotationEditorType,
   FeatureTest,
   getUuid,
+  makeArr,
   shadow,
   SVG_NS,
   Util,
@@ -133,9 +134,6 @@ class IdManager {
 
   constructor() {
     if (typeof PDFJSDev !== "undefined" && PDFJSDev.test("TESTING")) {
-      Object.defineProperty(this, "reset", {
-        value: () => (this.#id = 0),
-      });
       Object.defineProperty(this, "getNextId", {
         value: () => this.#id,
       });
@@ -311,10 +309,7 @@ class ImageManager {
 
   getSvgUrl(id) {
     const data = this.#cache.get(id);
-    if (!data?.isSvg) {
-      return null;
-    }
-    return data.svgUrl;
+    return !data?.isSvg ? null : data.svgUrl;
   }
 
   deleteId(id) {
@@ -369,10 +364,10 @@ class CommandManager {
   }
 
   /**
-   * @typedef {Object} addOptions
-   * @property {function} cmd
-   * @property {function} undo
-   * @property {function} [post]
+   * @typedef {object} addOptions
+   * @property {Function} cmd
+   * @property {Function} undo
+   * @property {Function} [post]
    * @property {boolean} mustExec
    * @property {number} type
    * @property {boolean} overwriteIfSameType
@@ -512,73 +507,140 @@ class CommandManager {
  * non-mac OSes.
  */
 class KeyboardManager {
+  static ALT = 0x1;
+
+  static CTRL = 0x2;
+
+  static META = 0x4;
+
+  static SHIFT = 0x8;
+
   /**
    * Create a new keyboard manager class.
    * @param {Array<Array>} callbacks - an array containing an array of shortcuts
-   * and a callback to call.
-   * A shortcut is a string like `ctrl+c` or `mac+ctrl+c` for mac OS.
+   * and a callback to call. If the array contains no `mac+`-prefixed entry,
+   * every shortcut applies on all platforms. As soon as it contains at least
+   * one `mac+` entry, the `mac+` ones become the macOS-only set and the bare
+   * entries apply only on non-Mac.
    */
   constructor(callbacks) {
-    this.buffer = [];
     this.callbacks = new Map();
-    this.allKeys = new Set();
 
     const { isMac } = FeatureTest.platform;
     for (const [keys, callback, options = {}] of callbacks) {
+      const hasMacOverride = keys.some(k => k.startsWith("mac+"));
       for (const key of keys) {
-        const isMacKey = key.startsWith("mac+");
-        if (isMac && isMacKey) {
-          this.callbacks.set(key.slice(4), { callback, options });
-          this.allKeys.add(key.split("+").at(-1));
-        } else if (!isMac && !isMacKey) {
-          this.callbacks.set(key, { callback, options });
-          this.allKeys.add(key.split("+").at(-1));
+        let shortcut = key;
+        if (hasMacOverride) {
+          const isMacKey = key.startsWith("mac+");
+          if (isMac !== isMacKey) {
+            continue;
+          }
+          if (isMacKey) {
+            shortcut = key.slice(4);
+          }
         }
+        const [keyName, modifiers] = KeyboardManager.#parseShortcut(shortcut);
+        if (keyName === null) {
+          continue;
+        }
+        this.callbacks
+          .getOrInsertComputed(keyName, makeArr)
+          .push({ callback, options, modifiers });
       }
     }
   }
 
   /**
-   * Serialize an event into a string in order to match a
-   * potential key for a callback.
-   * @param {KeyboardEvent} event
-   * @returns {string}
+   * Parse a shortcut string like "ctrl+shift+a" into a `[key, modifiers]`
+   * pair. Modifier names are case-insensitive and may appear in any order;
+   * the key part is matched against `event.key` so `Space` is normalized to
+   * `" "` but other names like `ArrowLeft`, `Enter`, `Backspace`, and
+   * single-letter keys (`a`, `Z`) are preserved.
+   * @param {string} value
+   * @returns {[string|null, number]}
    */
-  #serialize(event) {
-    if (event.altKey) {
-      this.buffer.push("alt");
+  static #parseShortcut(value) {
+    let keyPart = null;
+    let modifiers = 0;
+    for (let part of value.split("+")) {
+      part = part.trim();
+      if (!part) {
+        continue;
+      }
+      const upper = part.toUpperCase();
+      const modifier = KeyboardManager[upper];
+      if (modifier) {
+        modifiers |= modifier;
+        continue;
+      }
+      if (keyPart !== null) {
+        warn(`KeyboardManager: multiple keys in shortcut "${value}"`);
+        break;
+      }
+      keyPart = upper === "SPACE" ? " " : part;
     }
-    if (event.ctrlKey) {
-      this.buffer.push("ctrl");
+    if (keyPart === null) {
+      warn(`KeyboardManager: no key found in shortcut "${value}"`);
     }
-    if (event.metaKey) {
-      this.buffer.push("meta");
-    }
-    if (event.shiftKey) {
-      this.buffer.push("shift");
-    }
-    this.buffer.push(event.key);
-    const str = this.buffer.join("+");
-    this.buffer.length = 0;
+    return [keyPart, modifiers];
+  }
 
-    return str;
+  /**
+   * Translate `event.code` (a layout-independent physical key identifier) to
+   * the equivalent `event.key` value on a US layout, so a Ctrl+A shortcut
+   * still fires when the user is on a layout where the "A" key produces a
+   * non-Latin character.
+   * @param {string} code
+   * @returns {string|null}
+   */
+  static #codeToKey(code) {
+    // KeyA..KeyZ -> a..z, Digit0..Digit9 / Numpad0..Numpad9 -> 0..9.
+    // Codes like NumpadEnter are intentionally skipped — their event.key
+    // already matches the corresponding non-numpad key.
+    const match = /^(?:Key([A-Z])|(?:Digit|Numpad)(\d))$/.exec(code);
+    return !match ? null : (match[1]?.toLowerCase() ?? match[2]);
   }
 
   /**
    * Execute a callback, if any, for a given keyboard event.
    * The self is used as `this` in the callback.
-   * @param {Object} self
+   * @param {object} self
    * @param {KeyboardEvent} event
-   * @returns
    */
   exec(self, event) {
-    if (!this.allKeys.has(event.key)) {
-      return;
+    let shortcuts = this.callbacks.get(event.key);
+    if (!shortcuts) {
+      // Layout-independent fallback: on a Cyrillic layout the physical "A"
+      // key reports event.key="ф" but event.code="KeyA". This must be skipped
+      // when event.key is already a Latin letter, otherwise on AZERTY (where
+      // the "A" key has event.key="a" but event.code="KeyQ") ctrl+A would
+      // wrongly trigger ctrl+Q.
+      if (/^[a-z]$/i.test(event.key)) {
+        return;
+      }
+      const fallback = KeyboardManager.#codeToKey(event.code);
+      if (fallback === null || fallback === event.key) {
+        return;
+      }
+      shortcuts = this.callbacks.get(fallback);
+      if (!shortcuts) {
+        return;
+      }
     }
-    const info = this.callbacks.get(this.#serialize(event));
+
+    const eventModifiers =
+      (event.altKey ? KeyboardManager.ALT : 0) |
+      (event.ctrlKey ? KeyboardManager.CTRL : 0) |
+      (event.metaKey ? KeyboardManager.META : 0) |
+      (event.shiftKey ? KeyboardManager.SHIFT : 0);
+    const info = shortcuts.find(
+      shortcut => shortcut.modifiers === eventModifiers
+    );
     if (!info) {
       return;
     }
+
     const {
       callback,
       options: { bubbles = false, args = [], checker = null },
@@ -651,10 +713,7 @@ class ColorManager {
    */
   getHexCode(name) {
     const rgb = this._colors.get(name);
-    if (!rgb) {
-      return name;
-    }
-    return Util.makeHexColor(...rgb);
+    return !rgb ? name : Util.makeHexColor(...rgb);
   }
 }
 
@@ -678,6 +737,8 @@ class AnnotationEditorUIManager {
   #allLayers = new Map();
 
   #savedAllLayers = null;
+
+  #savedEditorsByPage = null;
 
   #altTextManager = null;
 
@@ -844,7 +905,7 @@ class AnnotationEditorUIManager {
           { checker: textInputChecker },
         ],
         [
-          ["Enter", "mac+Enter"],
+          ["Enter"],
           proto.addNewEditorFromKeyboard,
           {
             // Those shortcuts can be used in the toolbar for some other actions
@@ -857,7 +918,7 @@ class AnnotationEditorUIManager {
           },
         ],
         [
-          [" ", "mac+ "],
+          ["Space"],
           proto.addNewEditorFromKeyboard,
           {
             // Those shortcuts can be used in the toolbar for some other actions
@@ -868,9 +929,9 @@ class AnnotationEditorUIManager {
               self.#container.contains(document.activeElement),
           },
         ],
-        [["Escape", "mac+Escape"], proto.unselectAll],
+        [["Escape"], proto.unselectAll],
         [
-          ["ArrowLeft", "mac+ArrowLeft"],
+          ["ArrowLeft"],
           proto.translateSelectedEditors,
           { args: [-small, 0], checker: arrowChecker },
         ],
@@ -880,7 +941,7 @@ class AnnotationEditorUIManager {
           { args: [-big, 0], checker: arrowChecker },
         ],
         [
-          ["ArrowRight", "mac+ArrowRight"],
+          ["ArrowRight"],
           proto.translateSelectedEditors,
           { args: [small, 0], checker: arrowChecker },
         ],
@@ -890,7 +951,7 @@ class AnnotationEditorUIManager {
           { args: [big, 0], checker: arrowChecker },
         ],
         [
-          ["ArrowUp", "mac+ArrowUp"],
+          ["ArrowUp"],
           proto.translateSelectedEditors,
           { args: [0, -small], checker: arrowChecker },
         ],
@@ -900,7 +961,7 @@ class AnnotationEditorUIManager {
           { args: [0, -big], checker: arrowChecker },
         ],
         [
-          ["ArrowDown", "mac+ArrowDown"],
+          ["ArrowDown"],
           proto.translateSelectedEditors,
           { args: [0, small], checker: arrowChecker },
         ],
@@ -970,7 +1031,7 @@ class AnnotationEditorUIManager {
       },
       { capture: true, signal }
     );
-    window.addEventListener("beforeunload", this.#beforeUnload.bind(this), {
+    window.addEventListener("beforeunload", this.endCurrentEditing.bind(this), {
       capture: true,
       signal,
     });
@@ -995,13 +1056,6 @@ class AnnotationEditorUIManager {
     commentManager?.setSidebarUiManager(this);
 
     if (typeof PDFJSDev !== "undefined" && PDFJSDev.test("TESTING")) {
-      Object.defineProperty(this, "reset", {
-        value: () => {
-          this.selectAll();
-          this.delete();
-          this.#idManager.reset();
-        },
-      });
       Object.defineProperty(this, "getNextEditorId", {
         value: () => this.#idManager.getNextId(),
       });
@@ -1192,7 +1246,7 @@ class AnnotationEditorUIManager {
   /**
    * Delete a comment from an editor with undo support.
    * @param {AnnotationEditor} editor - The editor whose comment to delete.
-   * @param {Object} savedData - The comment data to save for undo.
+   * @param {object} savedData - The comment data to save for undo.
    */
   deleteComment(editor, savedData) {
     const undo = () => {
@@ -1400,7 +1454,7 @@ class AnnotationEditorUIManager {
     this.highlightSelection(methodOfCreation, /* comment */ true);
   }
 
-  #beforeUnload(e) {
+  endCurrentEditing() {
     this.commitOrRemove();
     this.currentLayer?.endDrawingSession(/* isAborted = */ false);
   }
@@ -1426,7 +1480,7 @@ class AnnotationEditorUIManager {
    * So this function retrieves the data from the storage and removes
    * them from the storage in order to be able to save them later.
    * @param {string} annotationId
-   * @returns {Object|null} The data associated to the annotation or null.
+   * @returns {object | null} The data associated to the annotation or null.
    */
   getAndRemoveDataFromAnnotationStorage(annotationId) {
     if (!this.#annotationStorage) {
@@ -1851,7 +1905,7 @@ class AnnotationEditorUIManager {
   }
 
   updatePageIndex(oldPageIndex, newPageIndex) {
-    for (const editor of this.getEditors(oldPageIndex)) {
+    for (const editor of this.#savedEditorsByPage.get(oldPageIndex) || []) {
       editor.pageIndex = newPageIndex;
     }
     const layer = this.#savedAllLayers.get(oldPageIndex);
@@ -1869,10 +1923,32 @@ class AnnotationEditorUIManager {
   startUpdatePages() {
     this.#savedAllLayers = new Map(this.#allLayers);
     this.#allLayers.clear();
+
+    const savedEditorsByPage = (this.#savedEditorsByPage = new Map());
+    const saveEditor = editor => {
+      savedEditorsByPage
+        .getOrInsertComputed(editor.pageIndex, makeArr)
+        .push(editor);
+    };
+    for (const editor of this.#allEditors.values()) {
+      saveEditor(editor);
+    }
+    // Clones are initially kept serialized until their editor layer is
+    // rendered, hence they're not present in #allEditors yet.
+    for (const [id, editor] of this.#annotationStorage) {
+      if (
+        id.startsWith(AnnotationEditorPrefix) &&
+        !this.#allEditors.has(id) &&
+        Number.isInteger(editor?.pageIndex)
+      ) {
+        saveEditor(editor);
+      }
+    }
   }
 
   endUpdatePages() {
     this.#savedAllLayers = null;
+    this.#savedEditorsByPage = null;
   }
 
   clonePage(pageIndex, newPageIndex) {
@@ -1913,7 +1989,7 @@ class AnnotationEditorUIManager {
   /**
    * Update the different possible states of this manager, e.g. is there
    * something to undo, redo, ...
-   * @param {Object} details
+   * @param {object} details
    */
   #dispatchUpdateStates(details) {
     const hasChanged = Object.entries(details).some(
@@ -2167,8 +2243,8 @@ class AnnotationEditorUIManager {
 
   /**
    * Update the toolbar if it's required to reflect the tool currently used.
-   * @param {Object} options
-   * @param {number} mode
+   * @param {object} options
+   * @param {number} options.mode
    * @returns {undefined}
    */
   updateToolbar(options) {
@@ -2289,7 +2365,7 @@ class AnnotationEditorUIManager {
   /**
    * Get all the editors belonging to a given page.
    * @param {number} pageIndex
-   * @yields {AnnotationEditor}
+   * @yields {AnnotationEditor} An editor on the given page.
    */
   *getEditors(pageIndex) {
     for (const editor of this.#allEditors.values()) {
@@ -2473,14 +2549,6 @@ class AnnotationEditorUIManager {
     });
   }
 
-  /**
-   * Check if the editor is selected.
-   * @param {AnnotationEditor} editor
-   */
-  isSelected(editor) {
-    return this.#selectedEditors.has(editor);
-  }
-
   get firstSelectedEditor() {
     return this.#selectedEditors.values().next().value;
   }
@@ -2535,7 +2603,7 @@ class AnnotationEditorUIManager {
 
   /**
    * Add a command to execute (cmd) and another one to undo it.
-   * @param {Object} params
+   * @param {object} params
    */
   addCommands(params) {
     this.#commandManager.add(params);
@@ -2849,7 +2917,7 @@ class AnnotationEditorUIManager {
   /**
    * Is the current editor the one passed as argument?
    * @param {AnnotationEditor} editor
-   * @returns
+   * @returns {boolean}
    */
   isActive(editor) {
     return this.#activeEditor === editor;

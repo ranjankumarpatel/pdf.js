@@ -2,6 +2,7 @@ import globals from "globals";
 
 import import_ from "eslint-plugin-import-x";
 import jasmine from "eslint-plugin-jasmine";
+import jsdoc from "eslint-plugin-jsdoc";
 import json from "@eslint/json";
 import noUnsanitized from "eslint-plugin-no-unsanitized";
 import perfectionist from "eslint-plugin-perfectionist";
@@ -62,6 +63,13 @@ export default [
     rules: {
       ...regexpPlugin.configs["flat/recommended"].rules,
       "regexp/no-legacy-features": "off",
+      "regexp/no-octal": "error",
+      "regexp/no-potentially-useless-backreference": "error",
+      "regexp/no-standalone-backslash": "error",
+      "regexp/no-super-linear-move": "error",
+      "regexp/optimal-lookaround-quantifier": "error",
+      "regexp/prefer-escape-replacement-dollar-char": "error",
+      "regexp/prefer-regexp-exec": "error",
     },
   },
   {
@@ -154,8 +162,10 @@ export default [
       "unicorn/no-abusive-eslint-disable": "error",
       "unicorn/no-array-reduce": ["error", { allowSimpleOperations: true }],
       "unicorn/no-console-spaces": "error",
+      "unicorn/no-incorrect-query-selector": "error",
       "unicorn/no-instanceof-builtins": "error",
       "unicorn/no-invalid-remove-event-listener": "error",
+      "unicorn/no-multiple-promise-resolver-calls": "error",
       "unicorn/no-new-buffer": "error",
       "unicorn/no-single-promise-in-promise-methods": "error",
       "unicorn/no-typeof-undefined": ["error", { checkGlobalVariables: false }],
@@ -173,18 +183,27 @@ export default [
       "unicorn/prefer-at": "error",
       "unicorn/prefer-class-fields": "error",
       "unicorn/prefer-classlist-toggle": "error",
+      "unicorn/prefer-combined-guards": "error",
       "unicorn/prefer-date-now": "error",
       "unicorn/prefer-dom-node-append": "error",
       "unicorn/prefer-dom-node-remove": "error",
       "unicorn/prefer-import-meta-properties": "error",
       "unicorn/prefer-includes": "error",
+      "unicorn/logical-assignment-operators": [
+        "error",
+        "always",
+        { enforceForIfStatements: true },
+      ],
       "unicorn/prefer-logical-operator-over-ternary": "error",
       "unicorn/prefer-modern-dom-apis": "error",
       "unicorn/prefer-modern-math-apis": "error",
       "unicorn/prefer-negative-index": "error",
       "unicorn/prefer-optional-catch-binding": "error",
       "unicorn/prefer-regexp-test": "error",
+      "unicorn/prefer-set-methods": "error",
+      "unicorn/prefer-short-arrow-method": "error",
       "unicorn/prefer-single-call": "error",
+      "unicorn/prefer-smaller-scope": "error",
       "unicorn/prefer-string-replace-all": "error",
       "unicorn/prefer-string-starts-ends-with": "error",
       "unicorn/prefer-ternary": ["error", "only-single-line"],
@@ -301,7 +320,14 @@ export default [
       // Stylistic Issues
       "lines-between-class-members": ["error", "always"],
       "max-len": ["error", { code: 1000, comments: 80, ignoreUrls: true }],
-      "new-cap": ["error", { newIsCap: true, capIsNew: false }],
+      "new-cap": [
+        "error",
+        {
+          newIsCap: true,
+          newIsCapExceptionPattern: "constructor",
+          capIsNew: false,
+        },
+      ],
       "no-array-constructor": "error",
       "no-multiple-empty-lines": ["error", { max: 1, maxEOF: 0, maxBOF: 1 }],
       "no-nested-ternary": "error",
@@ -393,6 +419,61 @@ export default [
     files: jsFiles("src"),
     rules: {
       "no-console": "error",
+    },
+  },
+
+  /* ======================================================================== *\
+                                   JSDoc
+  \* ======================================================================== */
+
+  {
+    files: jsFiles("."),
+
+    plugins: { jsdoc },
+
+    settings: {
+      jsdoc: {
+        tagNamePreference: { return: "returns" },
+      },
+    },
+
+    rules: {
+      "jsdoc/check-access": "error",
+      "jsdoc/check-alignment": "error",
+      "jsdoc/check-param-names": "error",
+      "jsdoc/check-property-names": "error",
+      // `@licstart`/`@licend` are GNU LibreJS tags, used in the license header.
+      "jsdoc/check-tag-names": [
+        "error",
+        { definedTags: ["licend", "licstart"] },
+      ],
+      "jsdoc/check-template-names": "error",
+      "jsdoc/check-types": "error",
+      "jsdoc/check-values": "error",
+      "jsdoc/empty-tags": "error",
+      "jsdoc/escape-inline-tags": "error",
+      "jsdoc/implements-on-classes": "error",
+      "jsdoc/multiline-blocks": "error",
+      "jsdoc/no-bad-blocks": "error",
+      "jsdoc/no-blank-block-descriptions": "error",
+      "jsdoc/no-blank-blocks": "error",
+      "jsdoc/no-multi-asterisks": "error",
+      "jsdoc/normalize-see-links": "error",
+      "jsdoc/require-asterisk-prefix": "error",
+      "jsdoc/require-param-name": "error",
+      "jsdoc/require-param-type": "error",
+      "jsdoc/require-property": "error",
+      "jsdoc/require-property-name": "error",
+      "jsdoc/require-property-type": "error",
+      "jsdoc/require-returns-check": "error",
+      "jsdoc/require-returns-type": "error",
+      "jsdoc/require-throws-description": "error",
+      "jsdoc/require-throws-type": "error",
+      "jsdoc/require-yields-check": "error",
+      "jsdoc/require-yields-description": "error",
+      "jsdoc/require-yields-type": "error",
+      "jsdoc/tag-lines": "error",
+      "jsdoc/valid-types": "error",
     },
   },
 

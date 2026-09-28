@@ -55,13 +55,13 @@ describe("accessibility", () => {
 
           // Check the headings match up.
           const head1 = await page.$eval(
-            ".structTree [role='heading'][aria-level='1'] span",
+            ".structTree [role='heading'][aria-level='1'] [aria-owns]",
             el =>
               document.getElementById(el.getAttribute("aria-owns")).textContent
           );
           expect(head1).withContext(`In ${browserName}`).toEqual("Heading 1");
           const head2 = await page.$eval(
-            ".structTree [role='heading'][aria-level='2'] span",
+            ".structTree [role='heading'][aria-level='2'] [aria-owns]",
             el =>
               document.getElementById(el.getAttribute("aria-owns")).textContent
           );
@@ -230,16 +230,12 @@ describe("accessibility", () => {
         pages.map(async ([browserName, page]) => {
           await page.waitForSelector(".structTree");
 
-          const isLinkedToStampAnnotation = await page.$eval(
-            ".structTree [role='figure']",
-            el =>
-              document
-                .getElementById(el.getAttribute("aria-owns"))
-                .classList.contains("stampAnnotation")
+          const owners = await page.$$eval(
+            `[aria-owns~="pdfjs_internal_id_20R"]`,
+            elements =>
+              elements.map(element => element.closest(".structTree") !== null)
           );
-          expect(isLinkedToStampAnnotation)
-            .withContext(`In ${browserName}`)
-            .toEqual(true);
+          expect(owners).withContext(`In ${browserName}`).toEqual([true]);
         })
       );
     });
@@ -471,11 +467,11 @@ describe("accessibility", () => {
         pages.map(async ([browserName, page]) => {
           const ariaHidden = await page.evaluate(() =>
             Array.from(
-              document.querySelectorAll(".structTree :has(> math)")
-            ).map(el =>
-              document
-                .getElementById(el.getAttribute("aria-owns"))
-                .getAttribute("aria-hidden")
+              document.querySelectorAll(".structTree :has(> math)"),
+              el =>
+                document
+                  .getElementById(el.getAttribute("aria-owns"))
+                  .getAttribute("aria-hidden")
             )
           );
           expect(ariaHidden)
@@ -557,8 +553,9 @@ describe("accessibility", () => {
         pages.map(async ([browserName, page]) => {
           let elementRole = await page.evaluate(() =>
             Array.from(
-              document.querySelector(".structTree [role='table']").children
-            ).map(child => child.getAttribute("role"))
+              document.querySelector(".structTree [role='table']").children,
+              child => child.getAttribute("role")
+            )
           );
 
           // THeader and TBody must be rowgroup.
@@ -570,8 +567,9 @@ describe("accessibility", () => {
             Array.from(
               document.querySelector(
                 ".structTree [role='table'] > [role='rowgroup'] > [role='row']"
-              ).children
-            ).map(child => child.getAttribute("role"))
+              ).children,
+              child => child.getAttribute("role")
+            )
           );
 
           // THeader has 3 columnheader.
@@ -583,8 +581,9 @@ describe("accessibility", () => {
             Array.from(
               document.querySelector(
                 ".structTree [role='table'] > [role='rowgroup']:nth-child(2)"
-              ).children
-            ).map(child => child.getAttribute("role"))
+              ).children,
+              child => child.getAttribute("role")
+            )
           );
 
           // TBody has 5 rows.
@@ -596,8 +595,9 @@ describe("accessibility", () => {
             Array.from(
               document.querySelector(
                 ".structTree [role='table'] > [role='rowgroup']:nth-child(2) > [role='row']:first-child"
-              ).children
-            ).map(child => child.getAttribute("role"))
+              ).children,
+              child => child.getAttribute("role")
+            )
           );
           // First row has a rowheader and 2 cells.
           expect(elementRole)

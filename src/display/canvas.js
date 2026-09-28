@@ -18,11 +18,16 @@ import {
   Dependencies,
 } from "./canvas_dependency_tracker.js";
 import {
+  convertBlackAndWhiteToRGBA,
+  convertRGBToRGBA,
+} from "../shared/image_utils.js";
+import {
   F32_BBOX_INIT,
   FeatureTest,
   FONT_IDENTITY_MATRIX,
   ImageKind,
   info,
+  makeArr,
   makeMap,
   OPS,
   shadow,
@@ -44,7 +49,6 @@ import {
   PathType,
   TilingPattern,
 } from "./pattern_helper.js";
-import { convertBlackAndWhiteToRGBA } from "../shared/image_utils.js";
 import { MathClamp } from "../shared/math_clamp.js";
 
 // <canvas> contexts store most of the state we need natively.
@@ -62,10 +66,6 @@ const EXECUTION_STEPS = 10;
 
 const FULL_CHUNK_HEIGHT = 16;
 
-// Only used in rescaleAndStroke. The goal is to avoid
-// creating a new DOMMatrix object each time we need it.
-const SCALE_MATRIX = new DOMMatrix();
-
 // Used to get some coordinates.
 const XY = new Float32Array(2);
 
@@ -77,10 +77,9 @@ const XY = new Float32Array(2);
  * only state modifiers that we cannot copy over when we switch contexts.
  *
  * To remove mirroring call `ctx._removeMirroring()`.
- *
- * @param {Object} ctx - The 2d canvas context that will duplicate its calls on
+ * @param {object} ctx - The 2d canvas context that will duplicate its calls on
  *   the destCtx.
- * @param {Object} destCtx - The 2d canvas context that will receive the
+ * @param {object} destCtx - The 2d canvas context that will receive the
  *   forwarded calls.
  */
 function mirrorContextOperations(ctx, destCtx) {
@@ -260,6 +259,9 @@ class CanvasExtraState {
 
   transferMaps = "none";
 
+  // Software fallback for transfer maps when canvas filters are unavailable.
+  transferMapsFallback = null;
+
   minMax = F32_BBOX_INIT.slice();
 
   constructor(width, height) {
@@ -316,11 +318,6 @@ class CanvasExtraState {
 }
 
 function putBinaryImageData(ctx, imgData) {
-  if (imgData instanceof ImageData) {
-    ctx.putImageData(imgData, 0, 0);
-    return;
-  }
-
   // Put the image data to the canvas in chunks, rather than putting the
   // whole image at once.  This saves JS memory, because the ImageData object
   // is smaller. It also possibly saves C++ memory within the implementation
@@ -332,72 +329,36 @@ function putBinaryImageData(ctx, imgData) {
   // will (conceptually) put pixels past the bounds of the canvas.  But
   // that's ok; any such pixels are ignored.
 
-  const height = imgData.height,
-    width = imgData.width;
+  const { width, height, kind } = imgData;
   const partialChunkHeight = height % FULL_CHUNK_HEIGHT;
   const fullChunks = (height - partialChunkHeight) / FULL_CHUNK_HEIGHT;
   const totalChunks = partialChunkHeight === 0 ? fullChunks : fullChunks + 1;
 
   const chunkImgData = ctx.createImageData(width, FULL_CHUNK_HEIGHT);
-  let srcPos = 0,
-    destPos;
+  let srcPos = 0;
   const src = imgData.data;
   const dest = chunkImgData.data;
-  let i, j, thisChunkHeight, elemsInThisChunk;
+  let i;
 
   // There are multiple forms in which the pixel data can be passed, and
   // imgData.kind tells us which one this is.
-  if (imgData.kind === ImageKind.GRAYSCALE_1BPP) {
+  if (kind === ImageKind.GRAYSCALE_1BPP) {
     // Grayscale, 1 bit per pixel (i.e. black-and-white).
-    const srcLength = src.byteLength;
-    const dest32 = new Uint32Array(dest.buffer, 0, dest.byteLength >> 2);
-    const dest32DataLength = dest32.length;
-    const fullSrcDiff = (width + 7) >> 3;
-    const white = 0xffffffff;
-    const black = FeatureTest.isLittleEndian ? 0xff000000 : 0x000000ff;
-
     for (i = 0; i < totalChunks; i++) {
-      thisChunkHeight = i < fullChunks ? FULL_CHUNK_HEIGHT : partialChunkHeight;
-      destPos = 0;
-      for (j = 0; j < thisChunkHeight; j++) {
-        const srcDiff = srcLength - srcPos;
-        let k = 0;
-        const kEnd = srcDiff > fullSrcDiff ? width : srcDiff * 8 - 7;
-        const kEndUnrolled = kEnd & ~7;
-        let mask = 0;
-        let srcByte = 0;
-        for (; k < kEndUnrolled; k += 8) {
-          srcByte = src[srcPos++];
-          dest32[destPos++] = srcByte & 128 ? white : black;
-          dest32[destPos++] = srcByte & 64 ? white : black;
-          dest32[destPos++] = srcByte & 32 ? white : black;
-          dest32[destPos++] = srcByte & 16 ? white : black;
-          dest32[destPos++] = srcByte & 8 ? white : black;
-          dest32[destPos++] = srcByte & 4 ? white : black;
-          dest32[destPos++] = srcByte & 2 ? white : black;
-          dest32[destPos++] = srcByte & 1 ? white : black;
-        }
-        for (; k < kEnd; k++) {
-          if (mask === 0) {
-            srcByte = src[srcPos++];
-            mask = 128;
-          }
-
-          dest32[destPos++] = srcByte & mask ? white : black;
-          mask >>= 1;
-        }
-      }
-      // We ran out of input. Make all remaining pixels transparent.
-      while (destPos < dest32DataLength) {
-        dest32[destPos++] = 0;
-      }
+      ({ srcPos } = convertBlackAndWhiteToRGBA({
+        src,
+        srcPos,
+        dest,
+        width,
+        height: i < fullChunks ? FULL_CHUNK_HEIGHT : partialChunkHeight,
+      }));
 
       ctx.putImageData(chunkImgData, 0, i * FULL_CHUNK_HEIGHT);
     }
-  } else if (imgData.kind === ImageKind.RGBA_32BPP) {
+  } else if (kind === ImageKind.RGBA_32BPP) {
     // RGBA, 32-bits per pixel.
-    j = 0;
-    elemsInThisChunk = width * FULL_CHUNK_HEIGHT * 4;
+    let j = 0;
+    let elemsInThisChunk = width * FULL_CHUNK_HEIGHT * 4;
     for (i = 0; i < fullChunks; i++) {
       dest.set(src.subarray(srcPos, srcPos + elemsInThisChunk));
       srcPos += elemsInThisChunk;
@@ -411,28 +372,21 @@ function putBinaryImageData(ctx, imgData) {
 
       ctx.putImageData(chunkImgData, 0, j);
     }
-  } else if (imgData.kind === ImageKind.RGB_24BPP) {
+  } else if (kind === ImageKind.RGB_24BPP) {
     // RGB, 24-bits per pixel.
-    thisChunkHeight = FULL_CHUNK_HEIGHT;
-    elemsInThisChunk = width * thisChunkHeight;
     for (i = 0; i < totalChunks; i++) {
-      if (i >= fullChunks) {
-        thisChunkHeight = partialChunkHeight;
-        elemsInThisChunk = width * thisChunkHeight;
-      }
-
-      destPos = 0;
-      for (j = elemsInThisChunk; j--; ) {
-        dest[destPos++] = src[srcPos++];
-        dest[destPos++] = src[srcPos++];
-        dest[destPos++] = src[srcPos++];
-        dest[destPos++] = 255;
-      }
+      ({ srcPos } = convertRGBToRGBA({
+        src,
+        srcPos,
+        dest: new Uint32Array(dest.buffer),
+        width,
+        height: i < fullChunks ? FULL_CHUNK_HEIGHT : partialChunkHeight,
+      }));
 
       ctx.putImageData(chunkImgData, 0, i * FULL_CHUNK_HEIGHT);
     }
   } else {
-    throw new Error(`bad image kind: ${imgData.kind}`);
+    throw new Error(`bad image kind: ${kind}`);
   }
 }
 
@@ -444,8 +398,7 @@ function putBinaryImageMask(ctx, imgData) {
   }
 
   // Slow path: OffscreenCanvas isn't available in the worker.
-  const height = imgData.height,
-    width = imgData.width;
+  const { width, height } = imgData;
   const partialChunkHeight = height % FULL_CHUNK_HEIGHT;
   const fullChunks = (height - partialChunkHeight) / FULL_CHUNK_HEIGHT;
   const totalChunks = partialChunkHeight === 0 ? fullChunks : fullChunks + 1;
@@ -456,18 +409,14 @@ function putBinaryImageMask(ctx, imgData) {
   const dest = chunkImgData.data;
 
   for (let i = 0; i < totalChunks; i++) {
-    const thisChunkHeight =
-      i < fullChunks ? FULL_CHUNK_HEIGHT : partialChunkHeight;
-
     // Expand the mask so it can be used by the canvas.  Any required
     // inversion has already been handled.
-
     ({ srcPos } = convertBlackAndWhiteToRGBA({
       src,
       srcPos,
       dest,
       width,
-      height: thisChunkHeight,
+      height: i < fullChunks ? FULL_CHUNK_HEIGHT : partialChunkHeight,
       nonBlackColor: 0,
     }));
 
@@ -520,6 +469,64 @@ function resetCtxToDefault(ctx) {
   }
 }
 
+/**
+ * Applies transfer maps when canvas filters are unavailable.
+ * The SVG filters aren't available in all environments (especially in workers
+ * with OffscreenCanvas), so this class provides a fallback mechanism for
+ * applying transfer maps directly to canvas image data.
+ */
+class TransferMapsFallback {
+  #maps;
+
+  constructor(maps) {
+    // One map applies to R, G, and B; `null` maps are identities.
+    const [mapR, mapG = mapR, mapB = mapR] = maps;
+    const { identityMap } = TransferMapsFallback;
+    this.#maps = [
+      mapR || identityMap,
+      mapG || identityMap,
+      mapB || identityMap,
+    ];
+  }
+
+  static get identityMap() {
+    return shadow(
+      this,
+      "identityMap",
+      Uint8Array.from({ length: 256 }, (_, i) => i)
+    );
+  }
+
+  /**
+   * @param {string} color
+   * @returns {string}
+   */
+  applyToColor(color) {
+    if (typeof color !== "string" || !color.startsWith("#")) {
+      return color; // E.g. "transparent".
+    }
+    const [r, g, b] = getRGBA(color);
+    const [mapR, mapG, mapB] = this.#maps;
+    return Util.makeHexColor(mapR[r], mapG[g], mapB[b]);
+  }
+
+  applyToImageData({ data }) {
+    const [mapR, mapG, mapB] = this.#maps;
+    for (let i = 0, ii = data.length; i < ii; i += 4) {
+      data[i] = mapR[data[i]];
+      data[i + 1] = mapG[data[i + 1]];
+      data[i + 2] = mapB[data[i + 2]];
+    }
+  }
+
+  applyToCanvas(ctx) {
+    const { width, height } = ctx.canvas;
+    const imgData = ctx.getImageData(0, 0, width, height);
+    this.applyToImageData(imgData);
+    ctx.putImageData(imgData, 0, 0);
+  }
+}
+
 function getImageSmoothingEnabled(transform, interpolate) {
   // In section 8.9.5.3 of the PDF spec, it's mentioned that the interpolate
   // flag should be used when the image is upscaled.
@@ -545,6 +552,10 @@ const NORMAL_CLIP = {};
 const EO_CLIP = {};
 
 class CanvasGraphics {
+  // Only used in rescaleAndStroke. The goal is to avoid
+  // creating a new DOMMatrix object each time we need it.
+  static #SCALE_MATRIX = null;
+
   // Knockout group support fields.
   #knockoutGroupLevel = 0;
 
@@ -647,7 +658,6 @@ class CanvasGraphics {
     this.pageColors = pageColors;
 
     this._cachedScaleForStroking = [-1, 0];
-    this._cachedGetSinglePixelWidth = null;
     this._cachedBitmapsMap = new Map();
 
     this.dependencyTracker = dependencyTracker ?? null;
@@ -749,7 +759,7 @@ class CanvasGraphics {
         }
       }
 
-      if (!operationsFilter || operationsFilter(i)) {
+      if (!operationsFilter || operationsFilter(i, operatorList)) {
         fnId = fnArray[i];
         // TODO: There is a `undefined` coming from somewhere.
         fnArgs = argsArray[i] ?? null;
@@ -987,8 +997,9 @@ class CanvasGraphics {
   _createMaskCanvas(opIdx, img) {
     const ctx = this.ctx;
     const { width, height } = img;
-    const fillColor = this.current.fillColor;
     const isPatternFill = this.current.patternFill;
+    // Solid-color styles contain the transferred fallback value.
+    const fillColor = isPatternFill ? this.current.fillColor : ctx.fillStyle;
     const currentTransform = getCurrentTransform(ctx);
 
     let cache, cacheKey, scaled, maskCanvas;
@@ -1245,11 +1256,38 @@ class CanvasGraphics {
           this.tempSMask = null;
           this.checkSMaskState(opIdx);
           break;
-        case "TR":
+        case "TR": {
           this.dependencyTracker?.recordSimpleData("filter", opIdx);
-          this.ctx.filter = this.current.transferMaps =
-            this.filterFactory.addFilter(value);
+          let filter = this.filterFactory.addFilter(value);
+          this.ctx.filter = filter;
+          let fallback = null;
+          if (
+            value &&
+            // Fall back if no SVG filter was created or canvas filters are
+            // unavailable or rejected.
+            (filter === "none" ||
+              !FeatureTest.isCanvasFilterSupported ||
+              this.ctx.filter === "none" ||
+              this.ctx.filter === "")
+          ) {
+            this.ctx.filter = filter = "none";
+            fallback = new TransferMapsFallback(value);
+          }
+          this.current.transferMaps = filter;
+          if (fallback || this.current.transferMapsFallback) {
+            this.current.transferMapsFallback = fallback;
+            // Reapply the maps to the current solid colors.
+            if (!this.current.patternFill) {
+              this.ctx.fillStyle = this.#transferColor(this.current.fillColor);
+            }
+            if (!this.current.patternStroke) {
+              this.ctx.strokeStyle = this.#transferColor(
+                this.current.strokeColor
+              );
+            }
+          }
           break;
+        }
       }
     }
   }
@@ -1539,11 +1577,10 @@ class CanvasGraphics {
     }
     let knockoutFilter = "none";
     if (needsAlphaScaling && this.#knockoutFilterCache instanceof Map) {
-      knockoutFilter = this.#knockoutFilterCache.get(alpha);
-      if (!knockoutFilter) {
-        knockoutFilter = this.filterFactory.addKnockoutFilter(alpha);
-        this.#knockoutFilterCache.set(alpha, knockoutFilter);
-      }
+      knockoutFilter = this.#knockoutFilterCache.getOrInsertComputed(
+        alpha,
+        () => this.filterFactory.addKnockoutFilter(alpha)
+      );
     }
 
     if (!needsAlphaScaling || knockoutFilter !== "none") {
@@ -1702,7 +1739,6 @@ class CanvasGraphics {
    * not) rather than against the running group result. We render onto a temp
    * canvas; path/clip/transform ops are mirrored back to the group canvas so
    * its state stays in sync for the next element.
-   *
    * @returns {boolean} true if a knockout element was started.
    */
   #beginKnockoutElement(alpha = 1) {
@@ -1757,7 +1793,6 @@ class CanvasGraphics {
    * coverage when alpha_s < 1), destination-out the group canvas over that
    * mask, restore the initial backdrop into the cleared footprint
    * (non-isolated only), then paint the element on top.
-   *
    * @param {boolean} started - the value returned by `#beginKnockoutElement`.
    */
   #endKnockoutElement(started) {
@@ -2101,7 +2136,6 @@ class CanvasGraphics {
     this.pendingClip = null;
 
     this._cachedScaleForStroking[0] = -1;
-    this._cachedGetSinglePixelWidth = null;
   }
 
   transform(opIdx, a, b, c, d, e, f) {
@@ -2109,7 +2143,6 @@ class CanvasGraphics {
     this.ctx.transform(a, b, c, d, e, f);
 
     this._cachedScaleForStroking[0] = -1;
-    this._cachedGetSinglePixelWidth = null;
   }
 
   // Path
@@ -2720,13 +2753,13 @@ class CanvasGraphics {
       this.showType3Text(opIdx, glyphs);
       this.dependencyTracker?.recordShowTextOperation(opIdx);
       this.#endKnockoutElement(started);
-      return undefined;
+      return;
     }
 
     const fontSize = current.fontSize;
     if (fontSize === 0) {
       this.dependencyTracker?.recordOperation(opIdx);
-      return undefined;
+      return;
     }
 
     const started = this.#beginKnockoutElement(current.fillAlpha);
@@ -2844,7 +2877,7 @@ class CanvasGraphics {
       ctx.restore();
       this.compose();
       this.#endKnockoutElement(started);
-      return undefined;
+      return;
     }
 
     let x = 0,
@@ -2960,7 +2993,6 @@ class CanvasGraphics {
 
     this.dependencyTracker?.recordShowTextOperation(opIdx);
     this.#endKnockoutElement(started);
-    return undefined;
   }
 
   showType3Text(opIdx, glyphs) {
@@ -2984,7 +3016,6 @@ class CanvasGraphics {
       return;
     }
     this._cachedScaleForStroking[0] = -1;
-    this._cachedGetSinglePixelWidth = null;
 
     ctx.save();
     if (current.textMatrix) {
@@ -3011,11 +3042,19 @@ class CanvasGraphics {
       }
 
       const spacing = (glyph.isSpace ? wordSpacing : 0) + charSpacing;
-      const operatorList = font.charProcOperatorList[glyph.operatorListId];
+      const operatorList = font.charProcOperatorList.get(glyph.operatorListId);
       if (!operatorList) {
         warn(`Type3 character "${glyph.operatorListId}" is not available.`);
       } else if (this.contentVisible) {
         this.save();
+        // A d0 (setCharWidth) glyph is colored (see Table 113 in pdf 1.7 specs)
+        // unlike a d1 glyph painted as a stencil mask with the current fill
+        // color. The constant alphas (ca/CA) are the opacity of that current
+        // color, so they must not attenuate a d0 glyph.
+        if (operatorList.fnArray[0] === OPS.setCharWidth) {
+          current.fillAlpha = current.strokeAlpha = 1;
+          ctx.globalAlpha = 1;
+        }
         ctx.scale(fontSize, fontSize);
         ctx.transform(...fontMatrix);
         this.executeOperatorList(operatorList);
@@ -3108,9 +3147,14 @@ class CanvasGraphics {
       pattern instanceof TilingPattern ? [0, 0, 0, 0] : null;
   }
 
+  #transferColor(color) {
+    return this.current.transferMapsFallback?.applyToColor(color) ?? color;
+  }
+
   setStrokeRGBColor(opIdx, color) {
     this.dependencyTracker?.recordSimpleData("strokeColor", opIdx);
-    this.ctx.strokeStyle = this.current.strokeColor = color;
+    this.current.strokeColor = color;
+    this.ctx.strokeStyle = this.#transferColor(color);
     this.current.patternStroke = false;
   }
 
@@ -3122,7 +3166,8 @@ class CanvasGraphics {
 
   setFillRGBColor(opIdx, color) {
     this.dependencyTracker?.recordSimpleData("fillColor", opIdx);
-    this.ctx.fillStyle = this.current.fillColor = color;
+    this.current.fillColor = color;
+    this.ctx.fillStyle = this.#transferColor(color);
     this.current.patternFill = false;
     this.current.tilingPatternDims = null;
   }
@@ -3135,13 +3180,9 @@ class CanvasGraphics {
   }
 
   _getPattern(opIdx, objId, matrix = null) {
-    let pattern;
-    if (this.cachedPatterns.has(objId)) {
-      pattern = this.cachedPatterns.get(objId);
-    } else {
-      pattern = getShadingPattern(this.getObject(opIdx, objId));
-      this.cachedPatterns.set(objId, pattern);
-    }
+    const pattern = this.cachedPatterns.getOrInsertComputed(objId, () =>
+      getShadingPattern(this.getObject(opIdx, objId))
+    );
     if (matrix) {
       pattern.matrix = matrix;
     }
@@ -3255,13 +3296,15 @@ class CanvasGraphics {
     }
 
     const currentCtx = this.ctx;
-    if (!group.isolated && !group.knockout && this.#knockoutGroupLevel === 0) {
-      info("TODO: Fully support non-isolated non-knockout groups.");
-    }
-
     if (
-      !group.needsIsolation &&
+      // A non-isolated group blends with its backdrop, so drawing it directly
+      // on the parent canvas (rather than on a transparent intermediate one)
+      // is correct even when it contains blend modes (bug 1873345). A soft
+      // mask still needs its own canvas though, and an isolated group requires
+      // a transparent backdrop, so both keep the intermediate canvas.
+      (!group.needsIsolation || (!group.isolated && !group.hasSoftMask)) &&
       !group.knockout &&
+      !group.isGray &&
       this.#knockoutGroupLevel === 0 &&
       currentCtx.globalAlpha === 1 &&
       currentCtx.globalCompositeOperation === "source-over" &&
@@ -3278,10 +3321,22 @@ class CanvasGraphics {
         }
         currentCtx.clip(clip);
       }
+      // Unlike the intermediate-canvas path below, the content is drawn
+      // straight onto the parent canvas with no later compositing step, so the
+      // inherited blend mode, alpha constants and transfer function must stay
+      // active here rather than being reset (issue 20722); the conditions
+      // above already guarantee a Normal blend and an opaque (ca === 1) state.
       this.groupStack.push(null); // null = no intermediate canvas
       this.#groupStackMeta.push(null);
       this.groupLevel++;
       return;
+    }
+
+    // Reached only when the direct path above didn't apply, e.g. a soft mask,
+    // non-default group alpha or blend mode: we still composite on a
+    // transparent intermediate canvas rather than the real backdrop.
+    if (!group.isolated && !group.knockout && this.#knockoutGroupLevel === 0) {
+      info("TODO: Fully support non-isolated non-knockout groups.");
     }
 
     const currentTransform = getCurrentTransform(currentCtx);
@@ -3366,18 +3421,52 @@ class CanvasGraphics {
     groupCtx.translate(-offsetX, -offsetY);
     groupCtx.transform(...currentTransform);
 
-    if (
-      !group.isolated &&
-      !group.smask &&
-      inSMaskMode &&
-      group.needsIsolation
-    ) {
-      // For non-isolated groups that need isolation and are entered from SMask
-      // mode, copy the current canvas background so that inner blend modes
-      // (e.g. "screen") interact correctly with the background rather than
-      // compositing onto a transparent canvas.
-      // Groups without needsIsolation have no inner blend modes; their content
-      // is composited correctly via the SMask in endGroup without a copy.
+    const needsBackdropCopy =
+      !group.isolated && !group.smask && group.needsIsolation;
+    const replaceBackdrop =
+      needsBackdropCopy &&
+      !inSMaskMode &&
+      savedKnockoutLevel === 0 &&
+      !group.knockout &&
+      !group.isGray &&
+      group.hasSoftMask &&
+      currentCtx.globalAlpha === 1 &&
+      currentCtx.globalCompositeOperation === "source-over" &&
+      this.current.transferMaps === "none" &&
+      !this.current.transferMapsFallback;
+    if (needsBackdropCopy && (inSMaskMode || replaceBackdrop)) {
+      // A non-isolated group that needs isolation (because of an inner blend
+      // mode and/or a soft mask) can't use the direct path above, so it
+      // renders on a transparent intermediate canvas. Copy the current
+      // backdrop into it so the inner blend modes (e.g. "multiply", "screen")
+      // interact with the real background instead of transparency; otherwise a
+      // /Multiply highlight, say, would be painted opaquely over the text
+      // behind it, hiding it (bug 1873345 -- same as the direct path, but here
+      // the soft mask forces an intermediate canvas).
+      // This is needed both when entered from SMask mode and at the top level;
+      // a non-isolated subgroup nested inside a knockout group instead gets its
+      // backdrop through the hasInnerBackdrop path in endGroup, so it's
+      // excluded here via savedKnockoutLevel.
+      //
+      // Outside SMask mode the copy is limited to a group that *would* have
+      // qualified for the direct path (source-over, group alpha 1, not
+      // knockout/gray) but was forced onto the intermediate canvas by its soft
+      // mask (`hasSoftMask`). Restricting to that domain keeps the change
+      // surgical:
+      //   - Only the soft-mask case is the bug 1873345 gap; a non-isolated
+      //     blend group pushed onto the intermediate canvas merely by a
+      //     non-default group alpha (no soft mask) is a separate pre-existing
+      //     case, left untouched to avoid changing its rendering (issue 13520).
+      //   - source-over/alpha 1 let endGroup replace the backdrop region with
+      //     the copied-and-updated result; compositing it normally would blend
+      //     partially transparent backdrop pixels twice. Under an outer blend
+      //     mode the outer blend would combine the backdrop with itself (e.g.
+      //     a /Multiply group with an inner soft mask darkens, issue 12798); a
+      //     non-1 group alpha would likewise mix the copied backdrop back in.
+      //     Those groups keep the transparent canvas and blend against the
+      //     real backdrop instead.
+      //   - isGray groups are grayscaled in endGroup, and inherited transfer
+      //     maps would also alter the copied backdrop.
       groupCtx.save();
       groupCtx.setTransform(1, 0, 0, 1, 0, 0);
       groupCtx.drawImage(currentCtx.canvas, -offsetX, -offsetY);
@@ -3446,6 +3535,7 @@ class CanvasGraphics {
       offsetX,
       offsetY,
       hasInnerBackdrop,
+      replaceBackdrop,
       knockoutMaskEntry,
       // Per-group scratch pools, lazily filled and freed in endGroup.
       knockoutTempEntry: null,
@@ -3473,6 +3563,13 @@ class CanvasGraphics {
       return;
     }
 
+    if (group.isGray) {
+      // The group color space is gray (a single component), so its rendered
+      // content must be converted to grayscale before being composited onto
+      // the parent canvas, see issue 7998.
+      this.#convertGroupToGray(groupCtx);
+    }
+
     this.ctx = ctx;
     // Turn off image smoothing to avoid sub pixel interpolation which can
     // look kind of blurry for some pdfs.
@@ -3498,6 +3595,8 @@ class CanvasGraphics {
       this.ctx.restore();
       const currentMtx = getCurrentTransform(this.ctx);
       this.restore(opIdx);
+      // Canvas filters run below; fallback maps must run here.
+      this.current.transferMapsFallback?.applyToCanvas(groupCtx);
       this.ctx.save();
       this.ctx.setTransform(...currentMtx);
       const dirtyBox = F32_BBOX_INIT.slice();
@@ -3592,6 +3691,14 @@ class CanvasGraphics {
           });
         }
       } else {
+        if (groupMeta.replaceBackdrop) {
+          // "copy" clears the destination outside the source within the
+          // current clip, so limit it to the intermediate canvas bounds.
+          const clip = new Path2D();
+          clip.rect(0, 0, groupCtx.canvas.width, groupCtx.canvas.height);
+          this.ctx.clip(clip);
+          this.ctx.globalCompositeOperation = "copy";
+        }
         this.ctx.drawImage(groupCtx.canvas, 0, 0);
       }
       this.ctx.restore();
@@ -3602,6 +3709,38 @@ class CanvasGraphics {
       this.#destroyKnockoutPools(groupMeta);
       this.compose(dirtyBox);
     }
+  }
+
+  #convertGroupToGray(groupCtx) {
+    const { canvas } = groupCtx;
+    const { width, height } = canvas;
+
+    if (FeatureTest.isCanvasFilterSupported) {
+      // Draw the canvas onto itself with the grayscale filter applied (which
+      // preserves the alpha channel), using the "copy" composite operation so
+      // the filtered content fully replaces the original.
+      groupCtx.save();
+      groupCtx.setTransform(1, 0, 0, 1, 0, 0);
+      groupCtx.filter = "grayscale(1)";
+      groupCtx.globalAlpha = 1;
+      groupCtx.globalCompositeOperation = "copy";
+      groupCtx.drawImage(canvas, 0, 0);
+      groupCtx.restore();
+      return;
+    }
+
+    // Fallback when canvas filters aren't supported: convert each pixel to
+    // grayscale by hand, using the same luminance coefficients as the
+    // "grayscale(1)" filter while leaving the alpha channel untouched.
+    const imageData = groupCtx.getImageData(0, 0, width, height);
+    const { data } = imageData;
+    for (let i = 0, ii = data.length; i < ii; i += 4) {
+      const gray =
+        (data[i] * 0.2126 + data[i + 1] * 0.7152 + data[i + 2] * 0.0722 + 0.5) |
+        0;
+      data[i] = data[i + 1] = data[i + 2] = gray;
+    }
+    groupCtx.putImageData(imageData, 0, 0);
   }
 
   #destroyKnockoutPools(groupMeta) {
@@ -3622,7 +3761,15 @@ class CanvasGraphics {
     }
   }
 
-  beginAnnotation(opIdx, id, rect, transform, matrix, hasOwnCanvas) {
+  beginAnnotation(
+    opIdx,
+    id,
+    rect,
+    transform,
+    matrix,
+    hasOwnCanvas,
+    canvasName
+  ) {
     // The annotations are drawn just after the page content.
     // The page content drawing can potentially have set a transform,
     // a clipping path, whatever...
@@ -3646,11 +3793,6 @@ class CanvasGraphics {
         transform[4] -= rect[0];
         transform[5] -= rect[1];
 
-        rect = rect.slice();
-        rect[0] = rect[1] = 0;
-        rect[2] = width;
-        rect[3] = height;
-
         Util.singularValueDecompose2dScale(getCurrentTransform(this.ctx), XY);
         const { viewportScale } = this;
         const canvasWidth = Math.ceil(
@@ -3665,7 +3807,25 @@ class CanvasGraphics {
           canvasHeight
         );
         const { canvas, context } = this.annotationCanvas;
-        this.annotationCanvasMap.set(id, canvas);
+        if (canvasName) {
+          const canvases = this.annotationCanvasMap.getOrInsertComputed(
+            id,
+            makeArr
+          );
+          canvas.setAttribute("data-canvas-name", canvasName);
+          // Replace any same-named canvas from a previous render so stale
+          // low-resolution canvases don't pile up across zooms.
+          const index = canvases.findIndex(
+            c => c.getAttribute("data-canvas-name") === canvasName
+          );
+          if (index === -1) {
+            canvases.push(canvas);
+          } else {
+            canvases[index] = canvas;
+          }
+        } else {
+          this.annotationCanvasMap.set(id, canvas);
+        }
         this.annotationCanvas.savedCtx = this.ctx;
         this.ctx = context;
         this.ctx.save();
@@ -3815,8 +3975,9 @@ class CanvasGraphics {
     const started = this.#beginKnockoutElement(this.current.fillAlpha);
     const ctx = this.ctx;
 
-    const fillColor = this.current.fillColor;
     const isPatternFill = this.current.patternFill;
+    // Solid-color styles contain the transferred fallback value.
+    const fillColor = isPatternFill ? this.current.fillColor : ctx.fillStyle;
 
     this.dependencyTracker
       ?.resetBBox(opIdx)
@@ -3915,20 +4076,24 @@ class CanvasGraphics {
       ctx.filter = this.current.transferMaps;
       ctx.drawImage(ctx.canvas, 0, 0);
       ctx.filter = "none";
+    } else {
+      this.current.transferMapsFallback?.applyToCanvas(ctx);
     }
     return ctx.canvas;
   }
 
   applyTransferMapsToBitmap(imgData) {
-    if (this.current.transferMaps === "none") {
+    const { transferMaps, transferMapsFallback } = this.current;
+    if (transferMaps === "none" && !transferMapsFallback) {
       return { img: imgData.bitmap, canvasEntry: null };
     }
     const { bitmap, width, height } = imgData;
     const tmpCanvas = this.canvasFactory.create(width, height);
     const tmpCtx = tmpCanvas.context;
-    tmpCtx.filter = this.current.transferMaps;
+    tmpCtx.filter = transferMaps;
     tmpCtx.drawImage(bitmap, 0, 0);
     tmpCtx.filter = "none";
+    transferMapsFallback?.applyToCanvas(tmpCtx);
 
     return { img: tmpCanvas.canvas, canvasEntry: tmpCanvas };
   }
@@ -3962,12 +4127,6 @@ class CanvasGraphics {
       const result = this.applyTransferMapsToBitmap(imgData);
       imgToPaint = result.img;
       inlineImgCanvas = result.canvasEntry;
-    } else if (
-      (typeof HTMLElement === "function" && imgData instanceof HTMLElement) ||
-      !imgData.data
-    ) {
-      // typeof check is needed due to node.js support, see issue #8489
-      imgToPaint = imgData;
     } else {
       const tmpCanvas = this.canvasFactory.create(width, height);
       putBinaryImageData(tmpCanvas.context, imgData);
@@ -4029,8 +4188,12 @@ class CanvasGraphics {
     const ctx = this.ctx;
     let imgToPaint;
     let inlineImgCanvas = null;
-    if (imgData.bitmap) {
+    if (imgData.bitmap && !this.current.transferMapsFallback) {
       imgToPaint = imgData.bitmap;
+    } else if (imgData.bitmap) {
+      // Apply the fallback once before drawing the repeated copies.
+      ({ img: imgToPaint, canvasEntry: inlineImgCanvas } =
+        this.applyTransferMapsToBitmap(imgData));
     } else {
       const w = imgData.width;
       const h = imgData.height;
@@ -4163,20 +4326,15 @@ class CanvasGraphics {
   }
 
   getSinglePixelWidth() {
-    if (!this._cachedGetSinglePixelWidth) {
-      const m = getCurrentTransform(this.ctx);
-      if (m[1] === 0 && m[2] === 0) {
-        // Fast path
-        this._cachedGetSinglePixelWidth =
-          1 / Math.min(Math.abs(m[0]), Math.abs(m[3]));
-      } else {
-        const absDet = Math.abs(m[0] * m[3] - m[2] * m[1]);
-        const normX = Math.hypot(m[0], m[2]);
-        const normY = Math.hypot(m[1], m[3]);
-        this._cachedGetSinglePixelWidth = Math.max(normX, normY) / absDet;
-      }
+    const m = getCurrentTransform(this.ctx);
+    if (m[1] === 0 && m[2] === 0) {
+      // Fast path
+      return 1 / Math.min(Math.abs(m[0]), Math.abs(m[3]));
     }
-    return this._cachedGetSinglePixelWidth;
+    const absDet = Math.abs(m[0] * m[3] - m[2] * m[1]);
+    const normX = Math.hypot(m[0], m[2]);
+    const normY = Math.hypot(m[1], m[3]);
+    return Math.max(normX, normY) / absDet;
   }
 
   getScaleForStroking() {
@@ -4250,6 +4408,7 @@ class CanvasGraphics {
       ctx.stroke(path);
       return;
     }
+    const SCALE_MATRIX = (CanvasGraphics.#SCALE_MATRIX ??= new DOMMatrix());
 
     const dashes = ctx.getLineDash();
     if (saveRestore) {

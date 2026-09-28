@@ -31,6 +31,10 @@ import { PDFFunctionFactory } from "./function.js";
 import { Stream } from "./stream.js";
 import { WasmImage } from "./wasm_image.js";
 
+/**
+ * @typedef { LocalPdfManager | NetworkPdfManager } PdfManager
+ */
+
 function parseDocBaseUrl(url) {
   if (url) {
     const absoluteUrl = createValidAbsoluteUrl(url);
@@ -104,12 +108,21 @@ class BasePdfManager {
     return this.ensure(this.pdfDocument, prop, args);
   }
 
-  ensureXRef(prop, args) {
-    return this.ensure(this.pdfDocument.xref, prop, args);
-  }
-
   ensureCatalog(prop, args) {
     return this.ensure(this.pdfDocument.catalog, prop, args);
+  }
+
+  async initDocument(recoveryMode) {
+    await this.ensureDoc("checkHeader");
+    await this.ensureDoc("parseStartXRef");
+    await this.ensureDoc("parse", [recoveryMode]);
+
+    // Check that at least the first page can be successfully loaded,
+    // since otherwise the XRef table is definitely not valid.
+    await this.ensureDoc("checkFirstPage", [recoveryMode]);
+    // Check that the last page can be successfully loaded, to ensure that
+    // `numPages` is correct, and fallback to walking the entire /Pages-tree.
+    await this.ensureDoc("checkLastPage", [recoveryMode]);
   }
 
   getPage(pageIndex) {
@@ -140,8 +153,16 @@ class BasePdfManager {
     unreachable("Abstract method `sendProgressiveData` called");
   }
 
+  /**
+   * Set password.
+   * @param {string} password
+   *   New password.
+   * @returns {undefined}
+   *   Nothing.
+   */
   updatePassword(password) {
     this._password = password;
+    this.pdfDocument.xref.encrypt?.setPassword(password);
   }
 
   terminate(reason) {
@@ -160,14 +181,7 @@ class LocalPdfManager extends BasePdfManager {
 
   async ensure(obj, prop, args) {
     const value = obj[prop];
-    if (typeof value === "function") {
-      return value.apply(obj, args);
-    }
-    return value;
-  }
-
-  requestRange(begin, end) {
-    return Promise.resolve();
+    return typeof value === "function" ? value.apply(obj, args) : value;
   }
 
   requestLoadedStream(noFetch = false) {
@@ -193,10 +207,7 @@ class NetworkPdfManager extends BasePdfManager {
   async ensure(obj, prop, args) {
     try {
       const value = obj[prop];
-      if (typeof value === "function") {
-        return await value.apply(obj, args);
-      }
-      return value;
+      return typeof value === "function" ? await value.apply(obj, args) : value;
     } catch (ex) {
       if (!(ex instanceof MissingDataException)) {
         throw ex;

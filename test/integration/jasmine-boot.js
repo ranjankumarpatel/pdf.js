@@ -23,7 +23,7 @@ async function runTests(results) {
   jasmine.exitOnCompletion = false;
   jasmine.jasmine.DEFAULT_TIMEOUT_INTERVAL = 30000;
 
-  jasmine.loadConfig({
+  await jasmine.loadConfig({
     random: true,
     spec_dir: "integration",
     spec_files: [
@@ -33,9 +33,12 @@ async function runTests(results) {
       "caret_browsing_spec.mjs",
       "comment_spec.mjs",
       "copy_paste_spec.mjs",
+      "cursor_tools_spec.mjs",
+      "digital_signature_spec.mjs",
       "document_properties_spec.mjs",
       "find_spec.mjs",
       "freetext_editor_spec.mjs",
+      "geckoview_spec.mjs",
       "highlight_editor_spec.mjs",
       "ink_editor_spec.mjs",
       "presentation_mode_spec.mjs",

@@ -39,7 +39,7 @@ import { internalOpt } from "./internal_evt.js";
 import { PresentationModeState } from "./ui_utils.js";
 
 /**
- * @typedef {Object} AnnotationLayerBuilderOptions
+ * @typedef {object} AnnotationLayerBuilderOptions
  * @property {PDFPageProxy} pdfPage
  * @property {AnnotationStorage} [annotationStorage]
  * @property {string} [imageResourcesPath] - Path for image resources, mainly
@@ -50,17 +50,17 @@ import { PresentationModeState } from "./ui_utils.js";
  * @property {boolean} [enableComment]
  * @property {boolean} [enableScripting]
  * @property {Promise<boolean>} [hasJSActionsPromise]
- * @property {Promise<Object<string, Array<Object>> | null>}
+ * @property {Promise<Record<string, Array<object>> | null>}
  *   [fieldObjectsPromise]
  * @property {Map<string, HTMLCanvasElement>} [annotationCanvasMap]
  * @property {TextAccessibilityManager} [accessibilityManager]
  * @property {AnnotationEditorUIManager} [annotationEditorUIManager]
- * @property {function} [onAppend]
+ * @property {Function} [onAppend]
  * @property {CommentManager} [commentManager]
  */
 
 /**
- * @typedef {Object} AnnotationLayerBuilderRenderOptions
+ * @typedef {object} AnnotationLayerBuilderRenderOptions
  * @property {PageViewport} viewport
  * @property {string} [intent] - The default value is "display".
  * @property {StructTreeLayerBuilder} [structTreeLayer]
@@ -71,8 +71,6 @@ class AnnotationLayerBuilder {
   #annotations = null;
 
   #commentManager = null;
-
-  #externalHide = false;
 
   #onAppend = null;
 
@@ -224,10 +222,14 @@ class AnnotationLayerBuilder {
 
     this.#eventAC?.abort();
     this.#eventAC = null;
+    this.annotationLayer?.destroy();
   }
 
-  hide(internal = false) {
-    this.#externalHide = !internal;
+  refreshCanvases() {
+    this.annotationLayer?.refreshCanvases();
+  }
+
+  hide() {
     if (!this.div) {
       return;
     }
@@ -239,7 +241,7 @@ class AnnotationLayerBuilder {
   }
 
   /**
-   * @param {Array<Object>} inferredLinks
+   * @param {Array<object>} inferredLinks
    * @returns {Promise<void>} A promise that is resolved when the inferred links
    *   are added to the annotation layer.
    */
@@ -263,10 +265,6 @@ class AnnotationLayerBuilder {
     }
 
     await this.annotationLayer.addLinkAnnotations(newLinks);
-    // Don't show the annotation layer if it was explicitly hidden previously.
-    if (!this.#externalHide) {
-      this.div.hidden = false;
-    }
   }
 
   #updatePresentationModeState(state) {
@@ -285,7 +283,10 @@ class AnnotationLayerBuilder {
         return;
     }
     for (const section of this.div.childNodes) {
-      if (section.hasAttribute("data-internal-link")) {
+      if (
+        section.hasAttribute("data-internal-link") ||
+        section.classList.contains("mediaAnnotation")
+      ) {
         continue;
       }
       section.inert = disableFormElements;
@@ -335,10 +336,7 @@ class AnnotationLayerBuilder {
       let linkAreaRects;
 
       for (const annotation of this.#annotations) {
-        if (
-          annotation.annotationType !== AnnotationType.LINK ||
-          !annotation.url
-        ) {
+        if (annotation.annotationType !== AnnotationType.LINK) {
           continue;
         }
         // TODO: Add a test case to verify that we can find the intersection

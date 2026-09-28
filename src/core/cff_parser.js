@@ -546,7 +546,7 @@ class CFFParser {
 
     let length = data.length;
 
-    for (let j = 0; j < length; ) {
+    for (let j = 0; j < length;) {
       const value = data[j++];
       let validationCommand = null;
       if (value === 12) {
@@ -740,7 +740,7 @@ class CFFParser {
     fdArray,
     privateDict,
   }) {
-    const seacs = [];
+    const seacs = new Map();
     const widths = [];
     const count = charStrings.count;
     for (let i = 0; i < count; i++) {
@@ -775,14 +775,12 @@ class CFFParser {
       } else if (localSubrIndex) {
         localSubrToUse = localSubrIndex;
       }
-      if (valid) {
-        valid = this.parseCharString(
-          state,
-          charstring,
-          localSubrToUse,
-          globalSubrIndex
-        );
-      }
+      valid &&= this.parseCharString(
+        state,
+        charstring,
+        localSubrToUse,
+        globalSubrIndex
+      );
       if (state.width !== null) {
         const nominalWidth = privateDictToUse.getByName("nominalWidthX");
         widths[i] = nominalWidth + state.width;
@@ -791,7 +789,7 @@ class CFFParser {
         widths[i] = defaultWidth;
       }
       if (state.seac !== null) {
-        seacs[i] = state.seac;
+        seacs.set(i, state.seac);
       }
       if (!valid) {
         // resetting invalid charstring to single 'endchar'
@@ -894,9 +892,22 @@ class CFFParser {
         }
       }
       if (maxZoneHeight > 0) {
+        // The lower bound of AFDKO's valid window is `0.5 / maxZoneHeight`.
+        // When that bound is itself above the default BlueScale the font simply
+        // has small zones (e.g. Eurostile LT Std, or the SofiaPro fonts shipped
+        // with a near-default 0.037): even the default 0.039625 would be
+        // flagged as out-of-range, so this is the rendered intent and forcing
+        // BlueScale up only misaligns/collapses overshooting glyphs (notably
+        // with macOS's Core Text rasterizer). Only apply the lower clamp when
+        // its target does not exceed the default.
+        // Round the bound in order to avoid too long operand (issue 21466).
+        const PRECISION = 1e5;
+        const lowerBound = 0.5 / maxZoneHeight;
         const minBlueScale =
-          blueScale < DEFAULT_BLUE_SCALE ? 0.5 / maxZoneHeight : -Infinity;
-        const maxBlueScale = 1 / maxZoneHeight;
+          lowerBound <= DEFAULT_BLUE_SCALE
+            ? Math.ceil(lowerBound * PRECISION) / PRECISION
+            : -Infinity;
+        const maxBlueScale = Math.floor(PRECISION / maxZoneHeight) / PRECISION;
         const clamped = MathClamp(blueScale, minBlueScale, maxBlueScale);
         if (clamped !== blueScale) {
           privateDict.setByName("BlueScale", clamped);
@@ -1165,10 +1176,9 @@ class CFFStrings {
     if (index >= 0 && index <= NUM_STANDARD_CFF_STRINGS - 1) {
       return CFFStandardStrings[index];
     }
-    if (index - NUM_STANDARD_CFF_STRINGS <= this.strings.length) {
-      return this.strings[index - NUM_STANDARD_CFF_STRINGS];
-    }
-    return CFFStandardStrings[0];
+    return index - NUM_STANDARD_CFF_STRINGS <= this.strings.length
+      ? this.strings[index - NUM_STANDARD_CFF_STRINGS]
+      : CFFStandardStrings[0];
   }
 
   getSID(str) {
@@ -1177,10 +1187,7 @@ class CFFStrings {
       return index;
     }
     index = this.strings.indexOf(str);
-    if (index !== -1) {
-      return index + NUM_STANDARD_CFF_STRINGS;
-    }
-    return -1;
+    return index !== -1 ? index + NUM_STANDARD_CFF_STRINGS : -1;
   }
 
   add(value) {
@@ -1217,6 +1224,8 @@ class CFFIndex {
 }
 
 class CFFDict {
+  values = new Map();
+
   constructor(tables, strings) {
     this.keyToNameMap = tables.keyToNameMap;
     this.nameToKeyMap = tables.nameToKeyMap;
@@ -1225,12 +1234,11 @@ class CFFDict {
     this.opcodes = tables.opcodes;
     this.order = tables.order;
     this.strings = strings;
-    this.values = Object.create(null);
   }
 
   // value should always be an array
   setByKey(key, value) {
-    if (!(key in this.keyToNameMap)) {
+    if (!this.keyToNameMap.has(key)) {
       return false;
     }
     // ignore empty values
@@ -1244,59 +1252,59 @@ class CFFDict {
         return true;
       }
     }
-    const type = this.types[key];
+    const type = this.types.get(key);
     // remove the array wrapping these types of values
     if (type === "num" || type === "sid" || type === "offset") {
       value = value[0];
     }
-    this.values[key] = value;
+    this.values.set(key, value);
     return true;
   }
 
   setByName(name, value) {
-    if (!(name in this.nameToKeyMap)) {
+    if (!this.nameToKeyMap.has(name)) {
       throw new FormatError(`Invalid dictionary name "${name}"`);
     }
-    this.values[this.nameToKeyMap[name]] = value;
+    const key = this.nameToKeyMap.get(name);
+    this.values.set(key, value);
   }
 
   hasName(name) {
-    return this.nameToKeyMap[name] in this.values;
+    const key = this.nameToKeyMap.get(name);
+    return this.values.has(key);
   }
 
   getByName(name) {
-    if (!(name in this.nameToKeyMap)) {
+    if (!this.nameToKeyMap.has(name)) {
       throw new FormatError(`Invalid dictionary name ${name}"`);
     }
-    const key = this.nameToKeyMap[name];
-    if (!(key in this.values)) {
-      return this.defaults[key];
-    }
-    return this.values[key];
+    const key = this.nameToKeyMap.get(name);
+    return this.values.has(key) ? this.values.get(key) : this.defaults.get(key);
   }
 
   removeByName(name) {
-    delete this.values[this.nameToKeyMap[name]];
+    const key = this.nameToKeyMap.get(name);
+    this.values.delete(key);
   }
 
   static createTables(layout) {
     const tables = {
-      keyToNameMap: {},
-      nameToKeyMap: {},
-      defaults: {},
-      types: {},
-      opcodes: {},
+      keyToNameMap: new Map(),
+      nameToKeyMap: new Map(),
+      defaults: new Map(),
+      types: new Map(),
+      opcodes: new Map(),
       order: [],
     };
     for (const entry of layout) {
       const key = Array.isArray(entry[0])
         ? (entry[0][0] << 8) + entry[0][1]
         : entry[0];
-      tables.keyToNameMap[key] = entry[1];
-      tables.nameToKeyMap[entry[1]] = key;
-      tables.types[key] = entry[2];
-      tables.defaults[key] = entry[3];
-      tables.opcodes[key] = Array.isArray(entry[0]) ? entry[0] : [entry[0]];
+      tables.keyToNameMap.set(key, entry[1]);
+      tables.nameToKeyMap.set(entry[1], key);
+      tables.types.set(key, entry[2]);
+      tables.defaults.set(key, entry[3]);
+      tables.opcodes.set(key, Array.isArray(entry[0]) ? entry[0] : [entry[0]]);
       tables.order.push(key);
     }
     return tables;
@@ -1349,9 +1357,10 @@ class CFFTopDict extends CFFDict {
     return shadow(this, "tables", this.createTables(CFFTopDictLayout));
   }
 
+  privateDict = null;
+
   constructor(strings) {
     super(CFFTopDict.tables, strings);
-    this.privateDict = null;
   }
 }
 
@@ -1381,9 +1390,10 @@ class CFFPrivateDict extends CFFDict {
     return shadow(this, "tables", this.createTables(CFFPrivateDictLayout));
   }
 
+  subrsIndex = null;
+
   constructor(strings) {
     super(CFFPrivateDict.tables, strings);
-    this.subrsIndex = null;
   }
 }
 
@@ -1417,41 +1427,40 @@ class CFFFDSelect {
   }
 
   getFDIndex(glyphIndex) {
-    if (glyphIndex < 0 || glyphIndex >= this.fdSelect.length) {
-      return -1;
-    }
-    return this.fdSelect[glyphIndex];
+    return glyphIndex < 0 || glyphIndex >= this.fdSelect.length
+      ? -1
+      : this.fdSelect[glyphIndex];
   }
 }
 
 // Helper class to keep track of where an offset is within the data and helps
 // filling in that offset once it's known.
 class CFFOffsetTracker {
-  offsets = Object.create(null);
+  #offsets = new Map();
 
   isTracking(key) {
-    return key in this.offsets;
+    return this.#offsets.has(key);
   }
 
   track(key, location) {
-    if (key in this.offsets) {
+    if (this.#offsets.has(key)) {
       throw new FormatError(`Already tracking location of ${key}`);
     }
-    this.offsets[key] = location;
+    this.#offsets.set(key, location);
   }
 
   offset(value) {
-    for (const key in this.offsets) {
-      this.offsets[key] += value;
+    for (const [key, val] of this.#offsets) {
+      this.#offsets.set(key, val + value);
     }
   }
 
   setEntryLocation(key, values, output) {
-    if (!(key in this.offsets)) {
+    if (!this.#offsets.has(key)) {
       throw new FormatError(`Not tracking location of ${key}`);
     }
     const data = output.data;
-    const dataOffset = this.offsets[key];
+    const dataOffset = this.#offsets.get(key);
     const size = 5;
     for (let i = 0, ii = values.length; i < ii; ++i) {
       const offset0 = i * size + dataOffset;
@@ -1596,10 +1605,9 @@ class CFFCompiler {
   }
 
   encodeNumber(value) {
-    if (Number.isInteger(value)) {
-      return this.encodeInteger(value);
-    }
-    return this.encodeFloat(value);
+    return Number.isInteger(value)
+      ? this.encodeInteger(value)
+      : this.encodeFloat(value);
   }
 
   static get EncodeFloatRegExp() {
@@ -1776,11 +1784,11 @@ class CFFCompiler {
     const out = [];
     // The dictionary keys must be in a certain order.
     for (const key of dict.order) {
-      if (!(key in dict.values)) {
+      if (!dict.values.has(key)) {
         continue;
       }
-      let values = dict.values[key];
-      let types = dict.types[key];
+      let values = dict.values.get(key);
+      let types = dict.types.get(key);
       if (!Array.isArray(types)) {
         types = [types];
       }
@@ -1805,7 +1813,7 @@ class CFFCompiler {
             // For offsets we just insert a 32bit integer so we don't have to
             // deal with figuring out the length of the offset when it gets
             // replaced later on by the compiler.
-            const name = dict.keyToNameMap[key];
+            const name = dict.keyToNameMap.get(key);
             // Some offsets have the offset and the length, so just record the
             // position of the first one.
             if (!offsetTracker.isTracking(name)) {
@@ -1824,7 +1832,7 @@ class CFFCompiler {
             throw new FormatError(`Unknown data type of ${type}`);
         }
       }
-      out.push(...dict.opcodes[key]);
+      out.push(...dict.opcodes.get(key));
     }
     return out;
   }

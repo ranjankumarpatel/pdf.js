@@ -19,7 +19,7 @@ import {
   DocumentActionEventType,
   FormatError,
   info,
-  objectSize,
+  makeArr,
   PermissionFlag,
   shadow,
   stringToUTF8String,
@@ -42,8 +42,8 @@ import {
   isRefsEqual,
   Name,
   Ref,
+  RefMap,
   RefSet,
-  RefSetCache,
 } from "./primitives.js";
 import { GlobalColorSpaceCache, GlobalImageCache } from "./image_utils.js";
 import { NameTree, NumberTree } from "./name_number_tree.js";
@@ -52,8 +52,40 @@ import { clearGlobalCaches } from "./cleanup_helper.js";
 import { ColorSpaceUtils } from "./colorspace_utils.js";
 import { FileSpec } from "./file_spec.js";
 import { MetadataParser } from "./metadata_parser.js";
+import { soundStreamToWav } from "./sound.js";
 import { stringToPDFString } from "./string_utils.js";
 import { StructTreeRoot } from "./struct_tree.js";
+
+/**
+ * @import {XRef} from "./xref.js";
+ */
+
+/**
+ * @callback GetAttachmentContent
+ *   Callback used to lazily fetch attachment content.
+ * @param {string} id
+ *   Unique attachment identifier.
+ * @returns {CatalogAttachmentContent}
+ *   Result.
+ */
+
+/**
+ * @typedef {Uint8Array | null} CatalogAttachmentContent
+ *   Attachment value.
+ */
+
+/**
+ * @typedef CatalogAttachment
+ *   Attachment metadata.
+ * @property {CatalogAttachmentContent | undefined} [content]
+ *   Value, when already available.
+ * @property {string} description
+ *   Description.
+ * @property {string} filename
+ *   Filename (just the basename) for display.
+ * @property {string} rawFilename
+ *   File path.
+ */
 
 const isRef = v => v instanceof Ref;
 
@@ -88,11 +120,17 @@ function fetchRemoteDest(action) {
 class Catalog {
   #actualNumPages = null;
 
+  #annotationAttachmentIdByRef = new RefMap();
+
+  #annotationAttachmentRefById = new Map();
+
+  #soundAttachmentIds = new Set();
+
   #catDict = null;
 
   builtInCMapCache = new Map();
 
-  fontCache = new RefSetCache();
+  fontCache = new RefMap();
 
   globalColorSpaceCache = new GlobalColorSpaceCache();
 
@@ -100,11 +138,11 @@ class Catalog {
 
   nonBlendModesSet = new RefSet();
 
-  pageDictCache = new RefSetCache();
+  pageDictCache = new RefMap();
 
-  pageIndexCache = new RefSetCache();
+  pageIndexCache = new RefMap();
 
-  pageKidsCountCache = new RefSetCache();
+  pageKidsCountCache = new RefMap();
 
   standardFontDataCache = new Map();
 
@@ -125,6 +163,43 @@ class Catalog {
 
   cloneDict() {
     return this.#catDict.clone();
+  }
+
+  /**
+   * Create an id for an attachment from a FileAttachment annotation.
+   *
+   * The id is registered here rather than parsed from a public string prefix in
+   * `attachmentContent`, since catalog attachment names can be arbitrary PDF
+   * strings and may otherwise collide with annotation-local ids.
+   * @param {Ref} ref
+   *   File-spec or embedded-file stream reference.
+   * @param {boolean} [isSound]
+   *   When set, the referenced stream holds raw PDF sound samples that
+   *   `attachmentContent` wraps in a WAV container on fetch.
+   * @returns {string}
+   *   Attachment id.
+   */
+  getAttachmentIdForAnnotation(ref, isSound = false) {
+    let id = this.#annotationAttachmentIdByRef.get(ref);
+    if (!id) {
+      const baseId = `attachmentRef:${ref.toString()}`;
+      id = baseId;
+
+      let i = 1;
+      while (
+        this.#annotationAttachmentRefById.has(id) ||
+        this.attachments?.has(id)
+      ) {
+        id = `${baseId}-${i++}`;
+      }
+
+      this.#annotationAttachmentIdByRef.put(ref, id);
+      this.#annotationAttachmentRefById.set(id, ref);
+    }
+    if (isSound) {
+      this.#soundAttachmentIds.add(id);
+    }
+    return id;
   }
 
   get version() {
@@ -153,11 +228,7 @@ class Catalog {
    */
   get needsRendering() {
     const needsRendering = this.#catDict.get("NeedsRendering");
-    return shadow(
-      this,
-      "needsRendering",
-      typeof needsRendering === "boolean" ? needsRendering : false
-    );
+    return shadow(this, "needsRendering", needsRendering === true);
   }
 
   get collection() {
@@ -210,19 +281,18 @@ class Catalog {
         /* suppressEncryption = */ !this.xref.encrypt?.encryptMetadata
       );
 
-      if (stream instanceof BaseStream && stream.dict instanceof Dict) {
-        const type = stream.dict.get("Type");
-        const subtype = stream.dict.get("Subtype");
-
-        if (isName(type, "Metadata") && isName(subtype, "XML")) {
-          // XXX: This should examine the charset the XML document defines,
-          // however since there are currently no real means to decode arbitrary
-          // charsets, let's just hope that the author of the PDF was reasonable
-          // enough to stick with the XML default charset, which is UTF-8.
-          const data = stringToUTF8String(stream.getString());
-          if (data) {
-            metadata = new MetadataParser(data).serializable;
-          }
+      if (
+        stream instanceof BaseStream &&
+        isDict(stream.dict, "Metadata") &&
+        isName(stream.dict.get("Subtype"), "XML")
+      ) {
+        // XXX: This should examine the charset the XML document defines,
+        // however since there are currently no real means to decode arbitrary
+        // charsets, let's just hope that the author of the PDF was reasonable
+        // enough to stick with the XML default charset, which is UTF-8.
+        const data = stringToUTF8String(stream.getString());
+        if (data) {
+          metadata = new MetadataParser(data).serializable;
         }
       }
     } catch (ex) {
@@ -252,19 +322,12 @@ class Catalog {
     if (!(obj instanceof Dict)) {
       return null;
     }
+    const markInfo = new Map();
 
-    const markInfo = {
-      Marked: false,
-      UserProperties: false,
-      Suspects: false,
-    };
-    for (const key in markInfo) {
-      const value = obj.get(key);
-      if (typeof value === "boolean") {
-        markInfo[key] = value;
-      }
+    for (const key of ["Marked", "UserProperties", "Suspects"]) {
+      const val = obj.get(key);
+      markInfo.set(key, val === true);
     }
-
     return markInfo;
   }
 
@@ -286,15 +349,11 @@ class Catalog {
   }
 
   #readStructTreeRoot() {
-    const rawObj = this.#catDict.getRaw("StructTreeRoot");
-    const obj = this.xref.fetchIfRef(rawObj);
-    if (!(obj instanceof Dict)) {
-      return null;
-    }
-
-    const root = new StructTreeRoot(this.xref, obj, rawObj);
-    root.init();
-    return root;
+    const rawObj = this.#catDict.getRaw("StructTreeRoot"),
+      obj = this.xref.fetchIfRef(rawObj);
+    return obj instanceof Dict
+      ? new StructTreeRoot(this.xref, obj, rawObj)
+      : null;
   }
 
   get toplevelPagesDict() {
@@ -369,6 +428,7 @@ class Catalog {
 
       const outlineItem = {
         action: data.action,
+        attachmentId: data.attachmentId,
         attachment: data.attachment,
         dest: data.dest,
         url: data.url,
@@ -444,11 +504,10 @@ class Catalog {
     // complement binary integer so we can use regular bitwise operations on it.
     flags += 2 ** 32;
 
-    const permissions = [];
-    for (const key in PermissionFlag) {
-      const value = PermissionFlag[key];
+    const permissions = new Set();
+    for (const value of Object.values(PermissionFlag)) {
       if (flags & value) {
-        permissions.push(value);
+        permissions.add(value);
       }
     }
     return permissions;
@@ -469,7 +528,7 @@ class Catalog {
       if (!Array.isArray(groupsData)) {
         return shadow(this, "optionalContentConfig", null);
       }
-      const groupRefCache = new RefSetCache();
+      const groupRefCache = new RefMap();
       // Ensure all the optional content groups are valid.
       for (const groupRef of groupsData) {
         if (!(groupRef instanceof Ref) || groupRefCache.has(groupRef)) {
@@ -610,10 +669,9 @@ class Catalog {
         return null;
       }
       const nestedOrder = parseOrder(value.slice(1), nestedLevels);
-      if (!nestedOrder?.length) {
-        return null;
-      }
-      return { name: stringToPDFString(nestedName), order: nestedOrder };
+      return !nestedOrder?.length
+        ? null
+        : { name: stringToPDFString(nestedName), order: nestedOrder };
     }
 
     function parseRBGroups(rbGroups) {
@@ -691,15 +749,17 @@ class Catalog {
   }
 
   get destinations() {
-    const rawDests = this.#readDests(),
-      dests = Object.create(null);
-    for (const obj of rawDests) {
+    const dests = new Map();
+
+    for (const obj of this.#readDests()) {
       if (obj instanceof NameTree) {
         for (const [key, value] of obj.getAll()) {
           const dest = fetchDest(value);
           if (dest) {
-            dests[stringToPDFString(key, /* keepEscapeSequence = */ true)] =
-              dest;
+            dests.set(
+              stringToPDFString(key, /* keepEscapeSequence = */ true),
+              dest
+            );
           }
         }
       } else if (obj instanceof Dict) {
@@ -707,8 +767,10 @@ class Catalog {
           const dest = fetchDest(value);
           if (dest) {
             // Always let the NameTree take precedence.
-            dests[stringToPDFString(key, /* keepEscapeSequence = */ true)] ||=
-              dest;
+            dests.getOrInsert(
+              stringToPDFString(key, /* keepEscapeSequence = */ true),
+              dest
+            );
           }
         }
       }
@@ -719,11 +781,10 @@ class Catalog {
   getDestination(id) {
     // Avoid extra lookup/parsing when all destinations are already available.
     if (Object.hasOwn(this, "destinations")) {
-      return this.destinations[id] ?? null;
+      return this.destinations.get(id) ?? null;
     }
 
-    const rawDests = this.#readDests();
-    for (const obj of rawDests) {
+    for (const obj of this.#readDests()) {
       if (obj instanceof NameTree || obj instanceof Dict) {
         const dest = fetchDest(obj.get(id));
         if (dest) {
@@ -735,13 +796,7 @@ class Catalog {
     // Always fallback to checking all destinations, in order to support:
     //  - PDF documents with out-of-order NameTrees (fixes issue 10272).
     //  - Destination keys that use PDFDocEncoding (fixes issue 19835).
-    if (rawDests.length) {
-      const dest = this.destinations[id];
-      if (dest) {
-        return dest;
-      }
-    }
-    return null;
+    return this.destinations.get(id) ?? null;
   }
 
   #readDests() {
@@ -850,13 +905,9 @@ class Catalog {
         case "A":
         case "a":
           const LIMIT = 26; // Use only the characters A-Z, or a-z.
-          const A_UPPER_CASE = 0x41,
-            A_LOWER_CASE = 0x61;
-
-          const baseCharCode = style === "a" ? A_LOWER_CASE : A_UPPER_CASE;
           const letterIndex = currentIndex - 1;
           const character = String.fromCharCode(
-            baseCharCode + (letterIndex % LIMIT)
+            style.charCodeAt(0) + (letterIndex % LIMIT)
           );
           currentLabel = character.repeat(Math.floor(letterIndex / LIMIT) + 1);
           break;
@@ -1007,17 +1058,18 @@ class Catalog {
           break;
         case "PrintPageRange":
           // The number of elements must be even.
-          if (Array.isArray(value) && value.length % 2 === 0) {
-            const isValid = value.every(
+          if (
+            Array.isArray(value) &&
+            value.length % 2 === 0 &&
+            value.every(
               (page, i, arr) =>
                 Number.isInteger(page) &&
                 page > 0 &&
                 (i === 0 || page >= arr[i - 1]) &&
                 page <= this.numPages
-            );
-            if (isValid) {
-              prefValue = value;
-            }
+            )
+          ) {
+            prefValue = value;
           }
           break;
         case "NumCopies":
@@ -1034,15 +1086,14 @@ class Catalog {
         warn(`Bad value, for key "${key}", in ViewerPreferences: ${value}.`);
         continue;
       }
-      prefs ??= Object.create(null);
-      prefs[key] = prefValue;
+      (prefs ??= new Map()).set(key, prefValue);
     }
     return shadow(this, "viewerPreferences", prefs);
   }
 
   get openAction() {
     const obj = this.#catDict.get("OpenAction");
-    const openAction = Object.create(null);
+    const openAction = new Map();
 
     if (obj instanceof Dict) {
       // Convert the OpenAction dictionary into a format that works with
@@ -1054,34 +1105,87 @@ class Catalog {
       Catalog.parseDestDictionary({ destDict, resultObj });
 
       if (Array.isArray(resultObj.dest)) {
-        openAction.dest = resultObj.dest;
+        openAction.set("dest", resultObj.dest);
       } else if (resultObj.action) {
-        openAction.action = resultObj.action;
+        openAction.set("action", resultObj.action);
       }
     } else if (isValidExplicitDest(obj)) {
-      openAction.dest = obj;
+      openAction.set("dest", obj);
     }
-    return shadow(
-      this,
-      "openAction",
-      objectSize(openAction) > 0 ? openAction : null
-    );
+    return shadow(this, "openAction", openAction.size ? openAction : null);
   }
 
+  /**
+   * Get attachments.
+   * @returns {Map<string, CatalogAttachment> | null}
+   *   Attachments.
+   */
   get attachments() {
     const obj = this.#catDict.get("Names");
+    /** @type {Map<string, CatalogAttachment> | null} */
     let attachments = null;
 
     if (obj instanceof Dict && obj.has("EmbeddedFiles")) {
       const nameTree = new NameTree(obj.getRaw("EmbeddedFiles"), this.xref);
       for (const [key, value] of nameTree.getAll()) {
-        const fs = new FileSpec(value);
-        attachments ??= Object.create(null);
-        attachments[stringToPDFString(key, /* keepEscapeSequence = */ true)] =
-          fs.serializable;
+        (attachments ??= new Map()).set(
+          stringToPDFString(key, /* keepEscapeSequence = */ true),
+          new FileSpec(value).serializable
+        );
       }
     }
     return shadow(this, "attachments", attachments);
+  }
+
+  /**
+   * @param {string} id
+   *   Unique attachment identifier.
+   * @returns {CatalogAttachmentContent | undefined}
+   *   Content, or `undefined` when no named attachment exists for the id.
+   */
+  #attachmentContentByName(id) {
+    const obj = this.#catDict.get("Names");
+    if (obj instanceof Dict && obj.has("EmbeddedFiles")) {
+      const nameTree = new NameTree(obj.getRaw("EmbeddedFiles"), this.xref);
+      for (const [key, value] of nameTree.getAll()) {
+        if (stringToPDFString(key, /* keepEscapeSequence = */ true) === id) {
+          return FileSpec.readContent(value);
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Get content for an attachment.
+   * @param {string} id
+   *   Unique attachment identifier (required).
+   * @returns {CatalogAttachmentContent}
+   *   Content.
+   */
+  attachmentContent(id) {
+    const namedContent = this.#attachmentContentByName(id);
+    if (namedContent !== undefined) {
+      return namedContent;
+    }
+
+    // Annotation-local attachments register the reference of their embedded
+    // content in the catalog, so it's re-fetched from the xref on demand
+    // instead of being cached (which would then need to survive `cleanup`).
+    // The reference points either at the file-spec dictionary or, for an inline
+    // file-spec, straight at the embedded-file stream.
+    const ref = this.#annotationAttachmentRefById.get(id);
+    if (ref) {
+      const target = this.xref.fetch(ref);
+      if (target instanceof BaseStream) {
+        const content = FileSpec.readStreamContent(target);
+        return this.#soundAttachmentIds.has(id)
+          ? (soundStreamToWav(target, content) ?? content)
+          : content;
+      }
+      return target instanceof Dict ? FileSpec.readContent(target) : null;
+    }
+    return null;
   }
 
   get rawEmbeddedFiles() {
@@ -1117,13 +1221,9 @@ class Catalog {
     let javaScript = null;
 
     function appendIfJavaScriptDict(name, jsDict) {
-      if (!(jsDict instanceof Dict)) {
+      if (!(jsDict instanceof Dict) || !isName(jsDict.get("S"), "JavaScript")) {
         return;
       }
-      if (!isName(jsDict.get("S"), "JavaScript")) {
-        return;
-      }
-
       let js = jsDict.get("JS");
       if (js instanceof BaseStream) {
         js = js.getString();
@@ -1136,7 +1236,7 @@ class Catalog {
       );
       // Skip empty entries, similar to the `_collectJS` function.
       if (js) {
-        (javaScript ||= new Map()).set(name, js);
+        (javaScript ??= new Map()).set(name, js);
       }
     }
 
@@ -1167,14 +1267,10 @@ class Catalog {
     );
 
     if (javaScript) {
-      actions ||= Object.create(null);
+      actions ??= new Map();
 
       for (const [key, val] of javaScript) {
-        if (key in actions) {
-          actions[key].push(val);
-        } else {
-          actions[key] = [val];
-        }
+        actions.getOrInsertComputed(key, makeArr).push(val);
       }
     }
     return shadow(this, "jsActions", actions);
@@ -1383,6 +1479,22 @@ class Catalog {
         }
       }
       if (!Array.isArray(kids)) {
+        // Prevent errors in corrupt PDF documents that violate the
+        // specification by *inlining* Page dicts (fixes issue21436.pdf).
+        let type = currentNode.getRaw("Type");
+        if (type instanceof Ref) {
+          try {
+            type = await xref.fetchAsync(type);
+          } catch (ex) {
+            addPageError(ex);
+            break;
+          }
+        }
+        if (isName(type, "Page") || !currentNode.has("Kids")) {
+          addPageDict(currentNode, null);
+          break;
+        }
+
         addPageError(
           new FormatError("Page dictionary kids object is not an array.")
         );
@@ -1458,6 +1570,9 @@ class Catalog {
     const xref = this.xref;
     let total = 0,
       ref = pageRef;
+    // Prevent circular references in the /Pages tree.
+    const visited = new RefSet();
+    visited.put(pageRef);
 
     while (true) {
       const node = await xref.fetchAsync(ref);
@@ -1477,6 +1592,12 @@ class Catalog {
         throw new FormatError("Node must be a dictionary.");
       }
       const parentRef = node.getRaw("Parent");
+      if (parentRef instanceof Ref) {
+        if (visited.has(parentRef)) {
+          throw new FormatError("Pages tree contains circular reference.");
+        }
+        visited.put(parentRef);
+      }
 
       const parent = await node.getAsync("Parent");
       if (!parent) {
@@ -1550,14 +1671,14 @@ class Catalog {
   }
 
   /**
-   * @typedef {Object} ParseDestDictionaryParameters
+   * @typedef {object} ParseDestDictionaryParameters
    * @property {Dict} destDict - The dictionary containing the destination.
-   * @property {Object} resultObj - The object where the parsed destination
+   * @property {object} resultObj - The object where the parsed destination
    *   properties will be placed.
    * @property {string} [docBaseUrl] - The document base URL that is used when
    *   attempting to recover valid absolute URLs from relative ones.
-   * @property {Object} [docAttachments] - The document attachments (may not
-   *   exist in most PDF documents).
+   * @property {Record<string, CatalogAttachment> | null} [docAttachments] - The
+   *   document attachments (may not exist in most PDF documents).
    */
 
   /**
@@ -1589,9 +1710,19 @@ class Catalog {
     // reached (e.g. integer MCIDs or MCR/OBJR dicts without further K).
     if (!pageRef) {
       const queue = [seDict];
+      // Prevent circular references in the structure tree.
+      const visited = new RefSet();
+      visited.put(seRef);
       while (queue.length > 0 && !pageRef) {
         const node = queue.shift();
-        const kids = node.get("K");
+        let kids = node.getRaw("K");
+        if (kids instanceof Ref) {
+          if (visited.has(kids)) {
+            continue;
+          }
+          visited.put(kids);
+          kids = xref.fetch(kids);
+        }
         let kidsArr;
         if (Array.isArray(kids)) {
           kidsArr = kids;
@@ -1601,6 +1732,12 @@ class Catalog {
           continue;
         }
         for (const kid of kidsArr) {
+          if (kid instanceof Ref) {
+            if (visited.has(kid)) {
+              continue;
+            }
+            visited.put(kid);
+          }
           const kidObj = xref.fetchIfRef(kid);
           if (!(kidObj instanceof Dict)) {
             continue; // integer MCID – leaf node, no Pg here
@@ -1625,10 +1762,10 @@ class Catalog {
           break;
         }
         const parentDict = xref.fetch(parentRaw);
-        if (!(parentDict instanceof Dict)) {
-          break;
-        }
-        if (isName(parentDict.get("Type"), "StructTreeRoot")) {
+        if (
+          !(parentDict instanceof Dict) ||
+          isName(parentDict.get("Type"), "StructTreeRoot")
+        ) {
           break;
         }
         const pg = parentDict.getRaw("Pg");
@@ -1740,8 +1877,7 @@ class Catalog {
         case "GoToR":
           const urlDict = action.get("F");
           if (urlDict instanceof Dict) {
-            const fs = new FileSpec(urlDict, /* skipContent = */ true);
-            ({ rawFilename: url } = fs.serializable);
+            url = new FileSpec(urlDict).filename;
           } else if (typeof urlDict === "string") {
             url = urlDict;
           } else {
@@ -1766,22 +1902,21 @@ class Catalog {
 
         case "GoToE":
           const target = action.get("T");
-          let attachment;
+          /** @type {string | null} */
+          let id = null;
 
-          if (docAttachments && target instanceof Dict) {
+          if (target instanceof Dict) {
             const relationship = target.get("R");
             const name = target.get("N");
 
             if (isName(relationship, "C") && typeof name === "string") {
-              attachment =
-                docAttachments[
-                  stringToPDFString(name, /* keepEscapeSequence = */ true)
-                ];
+              id = stringToPDFString(name, /* keepEscapeSequence = */ true);
             }
           }
 
-          if (attachment) {
-            resultObj.attachment = attachment;
+          if (docAttachments && id) {
+            resultObj.attachmentId = id;
+            resultObj.attachment = docAttachments.get(id);
 
             // NOTE: the destination is relative to the *attachment*.
             const attachmentDest = fetchRemoteDest(action);
@@ -1828,7 +1963,7 @@ class Catalog {
           }
           resultObj.setOCGState = {
             state: stateArr,
-            preserveRB: typeof preserveRB === "boolean" ? preserveRB : true,
+            preserveRB: preserveRB !== false,
           };
           break;
 

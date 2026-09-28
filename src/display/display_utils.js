@@ -188,10 +188,22 @@ function getPdfFilenameFromUrl(url, defaultFilename = "document.pdf") {
   }
 
   if (newURL.hash) {
-    const reFilename = /[^/?#=]+\.pdf\b(?!.*\.pdf\b)/i;
-    const hashFilename = reFilename.exec(newURL.hash);
-    if (hashFilename) {
-      return decode(hashFilename[0]);
+    // Locate the last ".pdf" and then extend it to the left, up to the closest
+    // separator. Both steps are linear, whereas a single pattern starting with
+    // `[^/?#=]+` is quadratic on a hash which contains no ".pdf" at all.
+    const { hash } = newURL;
+    let extensionStart = -1;
+    for (const { index } of hash.matchAll(/\.pdf\b/gi)) {
+      extensionStart = index;
+    }
+    if (extensionStart > 0) {
+      let filenameStart = extensionStart;
+      while (filenameStart > 0 && !"/?#=".includes(hash[filenameStart - 1])) {
+        filenameStart--;
+      }
+      if (filenameStart < extensionStart) {
+        return decode(hash.slice(filenameStart, extensionStart + 4));
+      }
     }
   }
 
@@ -275,7 +287,6 @@ class PDFDateString {
    * Moreover, Adobe Acrobat doesn't handle changing the date to universal time
    * and doesn't use the user's time zone (effectively ignoring the HH' and mm'
    * parts of the date string).
-   *
    * @param {string} input
    * @returns {Date|null}
    */
@@ -782,7 +793,7 @@ function makePathFromDrawOPS(data) {
   if (!data) {
     return path;
   }
-  for (let i = 0, ii = data.length; i < ii; ) {
+  for (let i = 0, ii = data.length; i < ii;) {
     switch (data[i++]) {
       case DrawOPS.moveTo:
         path.moveTo(data[i++], data[i++]);
@@ -817,6 +828,7 @@ function makePathFromDrawOPS(data) {
 export {
   applyOpacity,
   ColorScheme,
+  computeLuminance,
   CSSConstants,
   deprecated,
   fetchData,

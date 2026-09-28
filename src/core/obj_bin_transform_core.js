@@ -17,12 +17,13 @@ import { assert, FeatureTest } from "../shared/util.js";
 import {
   CSS_FONT_INFO,
   FONT_INFO,
+  InfoUtils,
   PATTERN_INFO,
   SYSTEM_FONT_INFO,
 } from "../shared/obj_bin_transform_utils.js";
 
 function compileCssFontInfo(info) {
-  const encoder = new TextEncoder();
+  const { encoder } = InfoUtils;
   const encodedStrings = {};
   let stringsLength = 0;
   for (const prop of CSS_FONT_INFO.strings) {
@@ -48,7 +49,7 @@ function compileCssFontInfo(info) {
 }
 
 function compileSystemFontInfo(info) {
-  const encoder = new TextEncoder();
+  const { encoder } = InfoUtils;
   const encodedStrings = {};
   let stringsLength = 0;
   for (const prop of SYSTEM_FONT_INFO.strings) {
@@ -99,6 +100,19 @@ function compileSystemFontInfo(info) {
 }
 
 function compileFontInfo(font) {
+  function writeArray(arr, arrLen, writerName, increment) {
+    if (arr) {
+      view.setUint8(offset++, arrLen);
+      for (const val of arr) {
+        view[writerName](offset, val, true);
+        offset += increment;
+      }
+    } else {
+      view.setUint8(offset++, 0);
+      offset += increment * arrLen; // TODO: optimize this padding away
+    }
+  }
+
   const systemFontInfoBuffer = font.systemFontInfo
     ? compileSystemFontInfo(font.systemFontInfo)
     : null;
@@ -106,7 +120,7 @@ function compileFontInfo(font) {
     ? compileCssFontInfo(font.cssFontInfo)
     : null;
 
-  const encoder = new TextEncoder();
+  const { encoder } = InfoUtils;
   const encodedStrings = {};
   let stringsLength = 0;
   for (const prop of FONT_INFO.strings) {
@@ -159,46 +173,34 @@ function compileFontInfo(font) {
     "compileFontInfo: Number properties offset mismatch"
   );
 
-  if (font.bbox) {
-    view.setUint8(offset++, 4);
-    for (const coord of font.bbox) {
-      view.setInt16(offset, coord, true);
-      offset += 2;
-    }
-  } else {
-    view.setUint8(offset++, 0);
-    offset += 2 * 4; // TODO: optimize this padding away
-  }
+  writeArray(
+    /* arr = */ font.bbox,
+    /* arrLen = */ 4,
+    /* writerName = */ "setInt16",
+    /* increment = */ 2
+  );
   assert(
     offset === FONT_INFO.OFFSET_FONT_MATRIX,
     "compileFontInfo: BBox properties offset mismatch"
   );
 
-  if (font.fontMatrix) {
-    view.setUint8(offset++, 6);
-    for (const point of font.fontMatrix) {
-      view.setFloat64(offset, point, true);
-      offset += 8;
-    }
-  } else {
-    view.setUint8(offset++, 0);
-    offset += 8 * 6; // TODO: optimize this padding away
-  }
+  writeArray(
+    /* arr = */ font.fontMatrix,
+    /* arrLen = */ 6,
+    /* writerName = */ "setFloat64",
+    /* increment = */ 8
+  );
   assert(
     offset === FONT_INFO.OFFSET_DEFAULT_VMETRICS,
     "compileFontInfo: FontMatrix properties offset mismatch"
   );
 
-  if (font.defaultVMetrics) {
-    view.setUint8(offset++, 3);
-    for (const metric of font.defaultVMetrics) {
-      view.setInt16(offset, metric, true);
-      offset += 2;
-    }
-  } else {
-    view.setUint8(offset++, 0);
-    offset += 3 * 2; // TODO: optimize this padding away
-  }
+  writeArray(
+    /* arr = */ font.defaultVMetrics,
+    /* arrLen = */ 3,
+    /* writerName = */ "setInt16",
+    /* increment = */ 2
+  );
   assert(
     offset === FONT_INFO.OFFSET_STRINGS,
     "compileFontInfo: DefaultVMetrics properties offset mismatch"

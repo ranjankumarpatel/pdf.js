@@ -17,6 +17,7 @@ import {
   awaitPromise,
   closePages,
   createPromise,
+  getAnnotationSelector,
   loadAndWait,
   waitForTimeout,
 } from "./test_utils.mjs";
@@ -165,6 +166,121 @@ describe("PDFPresentationMode", () => {
           await page.waitForFunction(
             `window.PDFViewerApplication.pdfViewer.currentPageNumber === 1`
           );
+
+          await exitPresentationMode(page, browserName);
+        })
+      );
+    });
+
+    it("check that clicking on internal links work in presentation mode", async () => {
+      await Promise.all(
+        pages.map(async ([browserName, page]) => {
+          await enterPresentationMode(page);
+
+          // Go to the last page.
+          await page.click("#pdfjs_internal_id_12R");
+          await page.waitForFunction(
+            `window.PDFViewerApplication.pdfViewer.currentPageNumber === 3`
+          );
+
+          // Go to the first page.
+          await page.keyboard.press("Home");
+          await page.waitForFunction(
+            `window.PDFViewerApplication.pdfViewer.currentPageNumber === 1`
+          );
+
+          await exitPresentationMode(page, browserName);
+        })
+      );
+    });
+  });
+
+  describe("RichMedia annotations", () => {
+    let pages;
+
+    beforeEach(async () => {
+      pages = await loadAndWait(
+        "multimedia_annotations.pdf",
+        getAnnotationSelector("4R"),
+        100
+      );
+    });
+
+    afterEach(async () => {
+      await closePages(pages);
+    });
+
+    it("must handle clicking embedded media in presentation mode", async () => {
+      await Promise.all(
+        pages.map(async ([browserName, page]) => {
+          const annotationSelector = getAnnotationSelector("4R");
+          const videoSelector = `${annotationSelector} video.mediaContent`;
+
+          await page.evaluate(() => {
+            window.__richMediaNavigationCalls = 0;
+            const { pdfViewer } = window.PDFViewerApplication;
+            for (const name of ["nextPage", "previousPage"]) {
+              const original = pdfViewer[name].bind(pdfViewer);
+              pdfViewer[name] = (...args) => {
+                window.__richMediaNavigationCalls++;
+                return original(...args);
+              };
+            }
+          });
+
+          await enterPresentationMode(page);
+          await page.waitForSelector(`${annotationSelector} .mediaPlayButton`, {
+            visible: true,
+          });
+          await page.click(`${annotationSelector} .mediaPlayButton`);
+          await page.waitForSelector(videoSelector, { timeout: 0 });
+
+          const result = await page.$eval(videoSelector, el => ({
+            hasSource: el.src.startsWith("blob:"),
+          }));
+          expect(result)
+            .withContext(`In ${browserName}`)
+            .toEqual({ hasSource: true });
+
+          const interactionResult = await page.$eval(videoSelector, el => {
+            const createTouchEvent = (type, x, y, hasTouch = true) => {
+              const evt = new Event(type, {
+                bubbles: true,
+                cancelable: true,
+              });
+              Object.defineProperty(evt, "touches", {
+                value: hasTouch ? [{ pageX: x, pageY: y }] : [],
+              });
+              return evt;
+            };
+
+            const wheelEvent = new WheelEvent("wheel", {
+              bubbles: true,
+              cancelable: true,
+              deltaY: 100,
+            });
+            el.dispatchEvent(wheelEvent);
+
+            const touchMoveEvent = createTouchEvent("touchmove", 20, 200);
+            el.dispatchEvent(createTouchEvent("touchstart", 200, 200));
+            el.dispatchEvent(touchMoveEvent);
+            el.dispatchEvent(
+              createTouchEvent("touchend", 20, 200, /* hasTouch = */ false)
+            );
+
+            return {
+              navigationCalls: window.__richMediaNavigationCalls,
+              pageNumber: window.PDFViewerApplication.page,
+              touchMoveDefaultPrevented: touchMoveEvent.defaultPrevented,
+              wheelDefaultPrevented: wheelEvent.defaultPrevented,
+            };
+          });
+          expect(interactionResult).withContext(`In ${browserName}`).toEqual({
+            navigationCalls: 0,
+            pageNumber: 1,
+            touchMoveDefaultPrevented: false,
+            wheelDefaultPrevented: false,
+          });
 
           await exitPresentationMode(page, browserName);
         })

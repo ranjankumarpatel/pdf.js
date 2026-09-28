@@ -34,7 +34,6 @@
  OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
  WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-/* globals jasmineRequire */
 
 // Modified jasmine's boot.js file to load PDF.js libraries async.
 
@@ -57,6 +56,7 @@ async function initializePDFJS(callback) {
       "pdfjs-test/unit/autolinker_spec.js",
       "pdfjs-test/unit/bidi_spec.js",
       "pdfjs-test/unit/canvas_factory_spec.js",
+      "pdfjs-test/unit/catalog_spec.js",
       "pdfjs-test/unit/cff_parser_spec.js",
       "pdfjs-test/unit/cmap_spec.js",
       "pdfjs-test/unit/colorspace_spec.js",
@@ -71,8 +71,12 @@ async function initializePDFJS(callback) {
       "pdfjs-test/unit/evaluator_spec.js",
       "pdfjs-test/unit/event_utils_spec.js",
       "pdfjs-test/unit/fetch_stream_spec.js",
+      "pdfjs-test/unit/font_loader_spec.js",
       "pdfjs-test/unit/font_substitutions_spec.js",
+      "pdfjs-test/unit/fonts_spec.js",
+      "pdfjs-test/unit/image_resizer_spec.js",
       "pdfjs-test/unit/image_utils_spec.js",
+      "pdfjs-test/unit/jpeg_stream_spec.js",
       "pdfjs-test/unit/message_handler_spec.js",
       "pdfjs-test/unit/metadata_spec.js",
       "pdfjs-test/unit/murmurhash3_spec.js",
@@ -96,11 +100,15 @@ async function initializePDFJS(callback) {
       "pdfjs-test/unit/primitives_spec.js",
       "pdfjs-test/unit/scripting_spec.js",
       "pdfjs-test/unit/scripting_utils_spec.js",
+      "pdfjs-test/unit/sound_spec.js",
       "pdfjs-test/unit/stream_spec.js",
       "pdfjs-test/unit/string_utils_spec.js",
+      "pdfjs-test/unit/struct_tree_layer_builder_spec.js",
       "pdfjs-test/unit/struct_tree_spec.js",
       "pdfjs-test/unit/svg_factory_spec.js",
       "pdfjs-test/unit/text_layer_spec.js",
+      "pdfjs-test/unit/to_unicode_map_spec.js",
+      "pdfjs-test/unit/touch_manager_spec.js",
       "pdfjs-test/unit/type1_parser_spec.js",
       "pdfjs-test/unit/ui_utils_spec.js",
       "pdfjs-test/unit/unicode_spec.js",
@@ -179,14 +187,7 @@ async function flushPendingWorkerCoverage() {
 }
 
 (function () {
-  window.jasmine = jasmineRequire.core(jasmineRequire);
-
-  jasmineRequire.html(jasmine);
-
   const env = jasmine.getEnv();
-
-  const jasmineInterface = jasmineRequire.interface(jasmine, env);
-  extend(window, jasmineInterface);
 
   // Runner Parameters
   const urls = new jasmine.HtmlReporterV2Urls();
@@ -212,13 +213,6 @@ async function flushPendingWorkerCoverage() {
 
   // Sets longer timeout.
   jasmine.DEFAULT_TIMEOUT_INTERVAL = 30000;
-
-  function extend(destination, source) {
-    for (const property in source) {
-      destination[property] = source[property];
-    }
-    return destination;
-  }
 
   function unitTestInit() {
     initializePDFJS(function () {

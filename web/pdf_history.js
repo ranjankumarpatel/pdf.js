@@ -29,13 +29,13 @@ const POSITION_UPDATED_THRESHOLD = 50;
 const UPDATE_VIEWAREA_TIMEOUT = 1000; // milliseconds
 
 /**
- * @typedef {Object} PDFHistoryOptions
+ * @typedef {object} PDFHistoryOptions
  * @property {PDFLinkService} linkService - The navigation/linking service.
  * @property {EventBus} eventBus - The application event bus.
  */
 
 /**
- * @typedef {Object} InitializeParameters
+ * @typedef {object} InitializeParameters
  * @property {string} fingerprint - The PDF document's unique fingerprint.
  * @property {boolean} [resetHistory] - Reset the browsing history.
  * @property {boolean} [updateUrl] - Attempt to update the document URL, with
@@ -43,7 +43,7 @@ const UPDATE_VIEWAREA_TIMEOUT = 1000; // milliseconds
  */
 
 /**
- * @typedef {Object} PushParameters
+ * @typedef {object} PushParameters
  * @property {string} [namedDest] - The named destination. If absent, a
  *   stringified version of `explicitDest` is used.
  * @property {Array} explicitDest - The explicit destination array.
@@ -188,7 +188,7 @@ class PDFHistory {
 
   /**
    * Push an internal destination to the browser history.
-   * @param {PushParameters}
+   * @param {PushParameters} params
    */
   push({ namedDest = null, explicitDest, pageNumber }) {
     if (!this._initialized) {
@@ -484,10 +484,12 @@ class PDFHistory {
         return false;
       }
     }
-    if (!Number.isInteger(state.uid) || state.uid < 0) {
-      return false;
-    }
-    if (state.destination === null || typeof state.destination !== "object") {
+    if (
+      !Number.isInteger(state.uid) ||
+      state.uid < 0 ||
+      state.destination === null ||
+      typeof state.destination !== "object"
+    ) {
       return false;
     }
     return true;
@@ -712,10 +714,11 @@ function isDestHashesEqual(destHash, pushHash) {
 
 function isDestArraysEqual(firstDest, secondDest) {
   function isEntryEqual(first, second) {
-    if (typeof first !== typeof second) {
-      return false;
-    }
-    if (Array.isArray(first) || Array.isArray(second)) {
+    if (
+      typeof first !== typeof second ||
+      Array.isArray(first) ||
+      Array.isArray(second)
+    ) {
       return false;
     }
     if (first !== null && typeof first === "object" && second !== null) {

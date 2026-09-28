@@ -65,7 +65,6 @@ const MATHML_NS = "http://www.w3.org/1998/Math/MathML";
 /**
  * Tracks and displays the CanvasRenderingContext2D graphics state for all
  * contexts created during a stepped render.
- *
  * @param {HTMLElement} panelEl  The #gfx-state-panel DOM element.
  */
 class CanvasContextDetailsView {
@@ -362,10 +361,7 @@ class CanvasContextDetailsView {
       if (Array.isArray(v)) {
         return [...v];
       }
-      if (typeof v === "object" && v !== null) {
-        return { ...v };
-      }
-      return v;
+      return typeof v === "object" && v !== null ? { ...v } : v;
     };
     return new Map([...state].map(([k, v]) => [k, clone(v)]));
   }

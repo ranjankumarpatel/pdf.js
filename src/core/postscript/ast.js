@@ -250,7 +250,6 @@ class Parser {
    *                 | operator          (any PS_OPERATOR except if / ifelse)
    *                 | '{' block '}' 'if'
    *                 | '{' block '}' '{' block '}' 'ifelse'
-   *
    * @returns {PsProgram}
    */
   parse() {
@@ -327,7 +326,6 @@ class Parser {
 /**
  * Convenience function: tokenize and parse a PostScript Type 4 function body
  * given as a plain string (already decoded from the PDF stream).
- *
  * @param {string} source
  * @returns {PsProgram}
  */
@@ -1003,7 +1001,9 @@ class PSStackToTree {
           // Boolean operands: true xor true = false xor false = false.
           // Integer operands: n xor n = 0.
           return new PsConstNode(
+            /* eslint-disable unicorn/prefer-logical-operator-over-ternary */
             first.valueType === PS_VALUE_TYPE.boolean ? false : 0
+            /* eslint-enable unicorn/prefer-logical-operator-over-ternary */
           );
         // TOKEN.mod, TOKEN.div, TOKEN.idiv are NOT simplified here:
         // x op x is undefined when x = 0, so we cannot fold without knowing

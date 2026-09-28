@@ -188,10 +188,7 @@ class CanvasBBoxTracker {
   }
 
   getOpenMarker() {
-    if (this._savesStack.length === 0) {
-      return null;
-    }
-    return this._savesStack.at(-1);
+    return this._savesStack.length === 0 ? null : this._savesStack.at(-1);
   }
 
   recordCloseMarker(opIdx, onSavePopped) {
@@ -303,6 +300,11 @@ class CanvasBBoxTracker {
 
   /**
    * @param {number} idx
+   * @param {boolean} [preserve=false] - When false, the pending bounding box
+   *   is cleared once recorded; pass true to keep it for subsequent
+   *   operations.
+   * @param {Iterable<Iterable<number>>} [dependencyLists] - Groups of operation
+   *   indices whose bounding boxes are also expanded to cover this operation.
    */
   recordOperation(idx, preserve = false, dependencyLists) {
     if (this._pendingBBoxIdx !== idx) {
@@ -735,6 +737,8 @@ class CanvasDependencyTracker {
 
   /**
    * @param {number} idx
+   * @param {boolean} [preserve=false] - When false, the pending dependencies
+   *   are cleared once recorded; pass true to keep them for later operations.
    */
   recordOperation(idx, preserve = false) {
     this.recordDependencies(idx, [FORCED_DEPENDENCY_LABEL]);
@@ -800,7 +804,6 @@ class CanvasDependencyTracker {
  * Used to track dependencies of nested operations list, that
  * should actually all map to the index of the operation that
  * contains the nested list.
- *
  * @implements {CanvasDependencyTracker}
  */
 class CanvasNestedDependencyTracker {
@@ -1025,7 +1028,6 @@ class CanvasNestedDependencyTracker {
 
   /**
    * @param {number} idx
-   * @param {SimpleDependency[]} dependencyNames
    */
   recordOperation(idx) {
     this.#dependencyTracker.recordOperation(this.#opIdx, true);
@@ -1107,7 +1109,7 @@ const Dependencies = {
     "sameLineText",
   ],
   transform: ["transform"],
-  transformAndFill: ["transform", "fillColor"],
+  transformAndFill: ["transform", "filter", "fillColor"],
 };
 
 /**

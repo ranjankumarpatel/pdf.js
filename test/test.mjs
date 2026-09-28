@@ -28,6 +28,7 @@ import {
   downloadManifestFiles,
   verifyManifestFiles,
 } from "./downloadutils.mjs";
+import { execSync } from "child_process";
 import fs from "fs";
 import istanbulCoverage from "istanbul-lib-coverage";
 import istanbulReportGenerator from "istanbul-reports";
@@ -96,15 +97,18 @@ function parseOptions() {
       jobs: { type: "string", short: "j", default: "1" },
       manifestFile: { type: "string", default: "test_manifest.json" },
       masterMode: { type: "boolean", short: "m", default: false },
+      noBrowserDownload: { type: "boolean", default: false },
       noChrome: { type: "boolean", default: false },
       noDownload: { type: "boolean", default: false },
       noFirefox: { type: "boolean", default: false },
       noPrompts: { type: "boolean", default: false },
       port: { type: "string", default: "0" },
       reftest: { type: "boolean", default: false },
+      shard: { type: "string", default: "" },
       statsDelay: { type: "string", default: "0" },
       statsFile: { type: "string", default: "" },
       strictVerify: { type: "boolean", default: false },
+      summaryFile: { type: "string", default: "" },
       testfilter: { type: "string", short: "t", multiple: true, default: [] },
       unitTest: { type: "boolean", default: false },
     },
@@ -125,6 +129,7 @@ function parseOptions() {
         "  --jobs, -j          Number of parallel tabs per browser. [1]\n" +
         "  --manifestFile      Path to manifest JSON file. [test_manifest.json]\n" +
         "  --masterMode, -m    Run the script in master mode.\n" +
+        "  --noBrowserDownload Use already installed browsers.\n" +
         "  --noChrome          Skip Chrome when running tests.\n" +
         "  --noDownload        Skip downloading of test PDFs.\n" +
         "  --noFirefox         Skip Firefox when running tests.\n" +
@@ -157,10 +162,22 @@ function parseOptions() {
     );
   }
 
+  let shard = null;
+  if (values.shard) {
+    const match = /^(\d+)\/(\d+)$/.exec(values.shard);
+    const index = match ? parseInt(match[1], 10) : 0;
+    const count = match ? parseInt(match[2], 10) : 0;
+    if (!match || index < 1 || index > count) {
+      throw new Error("--shard must be of the form k/N with 1 <= k <= N.");
+    }
+    shard = { index, count };
+  }
+
   return {
     ...values,
     jobs: parseInt(values.jobs, 10) || 1,
     port: parseInt(values.port, 10) || 0,
+    shard,
     statsDelay: parseInt(values.statsDelay, 10) || 0,
   };
 }
@@ -169,7 +186,10 @@ var refsTmpDir = "tmp";
 var testResultDir = "test_snapshots";
 var refsDir = "ref";
 var eqLog = "eq.log";
-var browserTimeout = 120;
+const browserTimeout = 120;
+const browserCloseTimeout = 15;
+var maxBrowserStartAttempts = 3;
+var maxSessionRestarts = 3;
 
 function monitorBrowserTimeout(session, onTimeout) {
   if (session.timeoutMonitor) {
@@ -239,7 +259,7 @@ async function startRefTest(masterMode, showRefImages) {
     var numFBFFailures = 0;
     var numEqFailures = 0;
     var numEqNoSnapshot = 0;
-    sessions.forEach(function (session) {
+    sessions.forEach(session => {
       numRuns += session.numRuns;
       numErrors += session.numErrors;
       numFBFFailures += session.numFBFFailures;
@@ -269,6 +289,22 @@ async function startRefTest(masterMode, showRefImages) {
 
     if (options.statsFile) {
       fs.writeFileSync(options.statsFile, JSON.stringify(stats, null, 2));
+    }
+    if (options.summaryFile) {
+      fs.writeFileSync(
+        options.summaryFile,
+        JSON.stringify({
+          platform: os.platform(),
+          masterMode,
+          shard: options.shard,
+          numRuns,
+          numErrors,
+          numFBFFailures,
+          numEqFailures,
+          numEqNoSnapshot,
+          runtime,
+        })
+      );
     }
     if (masterMode) {
       if (numEqFailures + numEqNoSnapshot > 0) {
@@ -438,24 +474,73 @@ async function handleSessionTimeout(session) {
   session.tasks = {};
 
   monitorBrowserTimeout(session, null);
-  if (session.page) {
-    session.recovering = true;
-    try {
-      await session.page.reload({
-        timeout: browserTimeout * 1000,
-        waitUntil: "domcontentloaded",
-      });
-      session.recovering = false;
-      monitorBrowserTimeout(session, handleSessionTimeout);
-      return;
-    } catch (err) {
-      console.log(
-        `Failed to reload ${session.name} after timeout: ${err.message}`
-      );
-      session.recovering = false;
+  session.recovering = true;
+  try {
+    if (session.page) {
+      try {
+        await session.page.reload({
+          timeout: browserTimeout * 1000,
+          waitUntil: "domcontentloaded",
+        });
+        monitorBrowserTimeout(session, handleSessionTimeout);
+        return;
+      } catch (err) {
+        console.log(
+          `Failed to reload ${session.name} after timeout: ${err.message}`
+        );
+      }
     }
+    // Continue with the remaining queue in a new browser.
+    if (await restartSession(session)) {
+      return;
+    }
+  } finally {
+    session.recovering = false;
   }
   closeSession(session.name);
+}
+
+async function startSessionBrowser(session) {
+  const browser = await startBrowser({
+    browserName: session.browserType,
+    startUrl: session.startUrl,
+  });
+  try {
+    const page = (await browser.pages())[0];
+    return { browser, page };
+  } catch (ex) {
+    await killBrowser(browser);
+    throw ex;
+  }
+}
+
+async function restartSession(session) {
+  if (session.restarts >= maxSessionRestarts) {
+    console.log(
+      `Not restarting ${session.name}: it was already restarted ${session.restarts} times.`
+    );
+    return false;
+  }
+  await killBrowser(session.browser);
+  session.browser = undefined;
+  session.page = undefined;
+
+  while (session.restarts < maxSessionRestarts) {
+    session.restarts++;
+    console.log(
+      `Restarting ${session.name} (${session.restarts}/${maxSessionRestarts})...`
+    );
+    try {
+      const { browser, page } = await startSessionBrowser(session);
+      session.browser = browser;
+      session.page = page;
+      monitorBrowserTimeout(session, handleSessionTimeout);
+      return true;
+    } catch (ex) {
+      console.log(`Failed to restart ${session.name}: ${ex.message}`);
+    }
+  }
+  return false;
 }
 
 function getTestManifest() {
@@ -475,6 +560,10 @@ function getTestManifest() {
       console.error("Unrecognized test IDs: " + testFilter.join(" "));
       return undefined;
     }
+  }
+  if (options.shard) {
+    const { index, count } = options.shard;
+    manifest = manifest.filter((_, i) => i % count === index - 1);
   }
   return manifest;
 }
@@ -698,8 +787,8 @@ async function checkRefTestResults(browser, id, results) {
   var task = session.tasks[id];
   session.numRuns++;
 
-  results.forEach(function (roundResults, round) {
-    roundResults.forEach(function (pageResult, page) {
+  results.forEach((roundResults, round) => {
+    roundResults.forEach((pageResult, page) => {
       if (!pageResult) {
         return; // no results
       }
@@ -759,8 +848,8 @@ async function checkRefTestResults(browser, id, results) {
     }
   }
   // Clear snapshot buffers and drop the task entry from the session.
-  results.forEach(function (roundResults) {
-    roundResults.forEach(function (pageResult) {
+  results.forEach(roundResults => {
+    roundResults.forEach(pageResult => {
       if (pageResult) {
         pageResult.snapshot = null;
         pageResult.baselineSnapshot = null;
@@ -800,9 +889,8 @@ async function handleWsBinaryResult(data) {
   if (!taskResults) {
     return;
   }
-  if (!taskResults[round]) {
-    taskResults[round] = [];
-  }
+  taskResults[round] ||= [];
+
   if (taskResults[round][page - 1]) {
     console.error(
       `Results for ${browser}:${id}:${round}:${page - 1} were already submitted`
@@ -853,7 +941,7 @@ function onAllSessionsClosedAfterTests(name) {
     stopServer();
     var numRuns = 0,
       numErrors = 0;
-    sessions.forEach(function (session) {
+    sessions.forEach(session => {
       numRuns += session.numRuns;
       numErrors += session.numErrors;
     });
@@ -999,30 +1087,14 @@ async function startBrowser({
     dumpio: true,
     defaultViewport: null,
     ignoreDefaultArgs: ["--disable-extensions"],
-    // The timeout for individual protocol (BiDi) calls should always be lower
-    // than the Jasmine timeout. This way protocol errors are always raised in
-    // the context of the tests that actually triggered them and don't leak
-    // through to other tests (causing unrelated failures or tracebacks). The
-    // timeout is set to 75% of the Jasmine timeout to catch operation errors
-    // later in the test run and because if a single operation takes that long
-    // it can't possibly succeed anymore.
-    protocolTimeout: 0.75 * /* jasmine.DEFAULT_TIMEOUT_INTERVAL = */ 30000,
+    // Firefox's `session.new` launch command uses this timeout.
+    protocolTimeout: browserTimeout * 1000,
   };
 
-  if (!tempDir) {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pdfjs-"));
-  }
+  tempDir ||= fs.mkdtempSync(path.join(os.tmpdir(), "pdfjs-"));
   const printFile = path.join(tempDir, "print.pdf");
 
   if (browserName === "chrome") {
-    // Slow down protocol calls by the given number of milliseconds. In Chrome
-    // protocol calls are faster than in Firefox and thus trigger in quicker
-    // succession. This can cause intermittent failures because new protocol
-    // calls can run before events triggered by the previous protocol calls had
-    // a chance to be processed (essentially causing events to get lost). This
-    // value gives Chrome a more similar execution speed as Firefox.
-    options.slowMo = 3;
-
     options.args = [
       // Avoid crashing because no sandbox is shipped by default and we only run
       // our own trusted content in the scope of the tests (for more information
@@ -1064,14 +1136,26 @@ async function startBrowser({
       // Disable WebGPU (prevents log spam on Windows, and environments like
       // GitHub Actions don't expose GPUs anyway).
       "dom.webgpu.enabled": false,
+      // Override system rendering parameters when Windows ClearType is enabled.
+      // Level 0 selects grayscale instead of subpixel antialiasing; mode 5
+      // selects natural symmetric rendering (antialiasing in both directions).
+      "gfx.font_rendering.cleartype_params.rendering_mode": 5,
+      "gfx.font_rendering.cleartype_params.cleartype_level": 0,
+      "gfx.font_rendering.cleartype_params.enhanced_contrast": 100,
+      "gfx.font_rendering.cleartype_params.gamma": 2200,
+      "gfx.font_rendering.cleartype_params.pixel_structure": 1,
       // It's helpful to see where the caret is.
       "accessibility.browsewithcaret": true,
       // Disable the newtabpage stuff.
       "browser.newtabpage.enabled": false,
       // Disable network connections to Contile.
       "browser.topsites.contile.enabled": false,
-      // Disable logging for remote settings.
+      // Disable logging for remote settings and the messaging system.
       "services.settings.loglevel": "off",
+      "messaging-system.log": "off",
+      // Disable Nimbus rollouts and studies.
+      "nimbus.rollouts.enabled": false,
+      "app.shield.optoutstudies.enabled": false,
       // Disable AI/ML functionality.
       "browser.ai.control.default": "blocked",
       "privacy.baselineFingerprintingProtection": false,
@@ -1086,20 +1170,57 @@ async function startBrowser({
   const browser = await puppeteer.launch(options);
 
   if (startUrl) {
-    const pages = await browser.pages();
-    const page = pages[0];
-    await page.goto(startUrl, { timeout: 0, waitUntil: "domcontentloaded" });
+    try {
+      const pages = await browser.pages();
+      const page = pages[0];
+      await page.goto(startUrl, {
+        timeout: browserTimeout * 1000,
+        waitUntil: "domcontentloaded",
+      });
+    } catch (ex) {
+      await killBrowser(browser);
+      throw ex;
+    }
   }
 
   return browser;
 }
 
-async function startBrowsers({ baseUrl, initializeSession, numSessions = 1 }) {
-  // Remove old browser revisions from Puppeteer's cache. Updating Puppeteer can
-  // cause new browser revisions to be downloaded, so trimming the cache will
-  // prevent the disk from filling up over time.
-  await puppeteer.trimCache();
+// Kill the browser process if browser.close() does not stop it.
+async function killBrowser(browser) {
+  if (!browser) {
+    return;
+  }
+  const browserProcess = browser.process();
+  let timeoutId;
+  try {
+    await Promise.race([
+      browser.close(),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(
+          () =>
+            reject(
+              new Error(`browser didn't close within ${browserCloseTimeout}s`)
+            ),
+          browserCloseTimeout * 1000
+        );
+      }),
+    ]);
+  } catch (ex) {
+    console.log(`Unable to close the browser: ${ex.message}`);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+  if (browserProcess?.exitCode === null && browserProcess.signalCode === null) {
+    try {
+      browserProcess.kill("SIGKILL");
+    } catch {
+      // Best effort.
+    }
+  }
+}
 
+async function startBrowsers({ baseUrl, initializeSession, numSessions = 1 }) {
   const browserNames = ["firefox", "chrome"];
   if (options.noChrome) {
     browserNames.splice(1, 1);
@@ -1107,6 +1228,21 @@ async function startBrowsers({ baseUrl, initializeSession, numSessions = 1 }) {
   if (options.noFirefox) {
     browserNames.splice(0, 1);
   }
+
+  if (!options.noBrowserDownload) {
+    for (const browserName of browserNames) {
+      const version = browserName === "firefox" ? "nightly" : "stable";
+      execSync(`npx puppeteer browsers install ${browserName}@${version}`, {
+        stdio: "inherit",
+      });
+    }
+
+    // Remove old browser revisions after installing new ones.
+    await puppeteer.trimCache();
+  }
+
+  // Register all sessions before any of them can finish.
+  const newSessions = [];
   for (const browserName of browserNames) {
     for (let i = 0; i < numSessions; i++) {
       // When running multiple sessions per browser, append an index suffix to
@@ -1114,25 +1250,6 @@ async function startBrowsers({ baseUrl, initializeSession, numSessions = 1 }) {
       // name for backward compatibility.
       const sessionName =
         numSessions === 1 ? browserName : `${browserName}-${i}`;
-
-      // The session must be pushed first and augmented with the browser once
-      // it's initialized. The reason for this is that browser initialization
-      // takes more time when the browser is not found locally yet and we don't
-      // want `onAllSessionsClosed` to trigger if one of the browsers is done
-      // and the other one is still initializing, since that would mean that
-      // once the browser is initialized the server would have stopped already.
-      // Pushing the session first ensures that `onAllSessionsClosed` will
-      // only trigger once all browsers are initialized and done.
-      const session = {
-        name: sessionName,
-        browserType: browserName,
-        sessionIndex: i,
-        sessionCount: numSessions,
-        browser: undefined,
-        page: undefined,
-        closed: false,
-      };
-      sessions.push(session);
 
       let startUrl = "";
       if (baseUrl) {
@@ -1142,18 +1259,50 @@ async function startBrowsers({ baseUrl, initializeSession, numSessions = 1 }) {
           `&delay=${options.statsDelay}&masterMode=${options.masterMode}` +
           `&coveragePerTest=${global.coveragePerTest || false}`;
       }
-      await startBrowser({ browserName, startUrl })
-        .then(async function (browser) {
-          session.browser = browser;
-          const pages = await browser.pages();
-          session.page = pages[0];
-          initializeSession(session);
-        })
-        .catch(function (ex) {
-          console.log(`Error while starting ${browserName}: ${ex.message}`);
-          session.numErrors = 1;
-          closeSession(sessionName);
-        });
+      const session = {
+        name: sessionName,
+        browserType: browserName,
+        sessionIndex: i,
+        sessionCount: numSessions,
+        startUrl,
+        browser: undefined,
+        page: undefined,
+        closed: false,
+        restarts: 0,
+      };
+      sessions.push(session);
+      newSessions.push(session);
+    }
+  }
+
+  for (const session of newSessions) {
+    let startedBrowser;
+    for (let attempt = 1; attempt <= maxBrowserStartAttempts; attempt++) {
+      try {
+        startedBrowser = await startSessionBrowser(session);
+        break;
+      } catch (ex) {
+        console.log(
+          `Error while starting ${session.name} ` +
+            `(attempt ${attempt}/${maxBrowserStartAttempts}): ${ex.message}`
+        );
+      }
+    }
+    if (!startedBrowser) {
+      initializeSession(session);
+      monitorBrowserTimeout(session, null);
+      session.numErrors = 1;
+      closeSession(session.name);
+      continue;
+    }
+    try {
+      session.browser = startedBrowser.browser;
+      session.page = startedBrowser.page;
+      initializeSession(session);
+    } catch (ex) {
+      console.log(`Error while initializing ${session.name}: ${ex.message}`);
+      session.numErrors = 1;
+      closeSession(session.name);
     }
   }
 }
@@ -1315,7 +1464,7 @@ async function closeSession(browser) {
         }
       }
 
-      await session.browser.close();
+      await killBrowser(session.browser);
     }
     session.closed = true;
     const allClosed = sessions.every(s => s.closed);
@@ -1418,4 +1567,4 @@ const perTestFileIndex = new Map();
 
 main();
 
-export { startBrowser };
+export { browserCloseTimeout, browserTimeout, killBrowser, startBrowser };

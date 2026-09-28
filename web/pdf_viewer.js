@@ -88,7 +88,7 @@ function isValidAnnotationEditorMode(mode) {
 }
 
 /**
- * @typedef {Object} PDFViewerOptions
+ * @typedef {object} PDFViewerOptions
  * @property {HTMLDivElement} container - The container for the viewer element.
  * @property {HTMLDivElement} [viewer] - The viewer element.
  * @property {EventBus} eventBus - The application event bus.
@@ -146,7 +146,7 @@ function isValidAnnotationEditorMode(mode) {
  * @property {L10n} [l10n] - Localization service.
  * @property {boolean} [enablePermissions] - Enables PDF document permissions,
  *   when they exist. The default value is `false`.
- * @property {Object} [pageColors] - Overwrites background and foreground colors
+ * @property {object} [pageColors] - Overwrites background and foreground colors
  *   with user defined ones in order to improve readability in high contrast
  *   mode.
  * @property {boolean} [supportsPinchToZoom] - Enable zooming on pinch gesture.
@@ -265,9 +265,14 @@ class PDFViewer {
 
   #mlManager = null;
 
+  // The scroll position wanted by `panBy`, with its fractions.
+  #panPosition = [NaN, NaN];
+
   #printingAllowed = true;
 
   #scrollTimeoutId = null;
+
+  #staleLocation = false;
 
   #switchAnnotationEditorModeAC = null;
 
@@ -617,7 +622,8 @@ class PDFViewer {
   }
 
   /**
-   * @param val - The scale of the pages (in percent or predefined value).
+   * @param {string} val - The scale of the pages (in percent or predefined
+   *   value).
    */
   set currentScaleValue(val) {
     if (!this.pdfDocument) {
@@ -720,9 +726,14 @@ class PDFViewer {
     });
   }
 
+  #setPrintingAllowed(isAllowed) {
+    this.#printingAllowed = isAllowed;
+    this.eventBus.dispatch("printingallowed", { source: this, isAllowed });
+  }
+
   /**
    * Currently only *some* permissions are supported.
-   * @returns {Object}
+   * @returns {object}
    */
   #initializePermissions(permissions) {
     const params = {
@@ -731,37 +742,29 @@ class PDFViewer {
       textLayerMode: this.#textLayerMode,
     };
     if (!permissions) {
-      this.#printingAllowed = true;
-      this.eventBus.dispatch("printingallowed", {
-        source: this,
-        isAllowed: this.#printingAllowed,
-      });
-
+      this.#setPrintingAllowed(true);
       return params;
     }
 
-    this.#printingAllowed =
-      permissions.includes(PermissionFlag.PRINT_HIGH_QUALITY) ||
-      permissions.includes(PermissionFlag.PRINT);
-    this.eventBus.dispatch("printingallowed", {
-      source: this,
-      isAllowed: this.#printingAllowed,
-    });
+    this.#setPrintingAllowed(
+      permissions.has(PermissionFlag.PRINT_HIGH_QUALITY) ||
+        permissions.has(PermissionFlag.PRINT)
+    );
 
     if (
-      !permissions.includes(PermissionFlag.COPY) &&
+      !permissions.has(PermissionFlag.COPY) &&
       this.#textLayerMode === TextLayerMode.ENABLE
     ) {
       params.textLayerMode = TextLayerMode.ENABLE_PERMISSIONS;
     }
 
-    if (!permissions.includes(PermissionFlag.MODIFY_CONTENTS)) {
+    if (!permissions.has(PermissionFlag.MODIFY_CONTENTS)) {
       params.annotationEditorMode = AnnotationEditorType.DISABLE;
     }
 
     if (
-      !permissions.includes(PermissionFlag.MODIFY_ANNOTATIONS) &&
-      !permissions.includes(PermissionFlag.FILL_INTERACTIVE_FORMS) &&
+      !permissions.has(PermissionFlag.MODIFY_ANNOTATIONS) &&
+      !permissions.has(PermissionFlag.FILL_INTERACTIVE_FORMS) &&
       this.#annotationMode === AnnotationMode.ENABLE_FORMS
     ) {
       params.annotationMode = AnnotationMode.ENABLE;
@@ -906,7 +909,7 @@ class PDFViewer {
   }
 
   /**
-   * @param {PDFDocumentProxy} pdfDocument
+   * @param {PDFDocumentProxy|null} pdfDocument
    */
   setDocument(pdfDocument) {
     if (this.pdfDocument) {
@@ -921,8 +924,9 @@ class PDFViewer {
       this.#annotationEditorUIManager?.destroy();
       this.#annotationEditorUIManager = null;
 
-      this.#annotationEditorMode = AnnotationEditorType.NONE;
-
+      if (this.#annotationEditorMode !== AnnotationEditorType.DISABLE) {
+        this.#annotationEditorMode = AnnotationEditorType.NONE;
+      }
       this.#printingAllowed = true;
     }
 
@@ -1337,9 +1341,9 @@ class PDFViewer {
     }
     if (!labels) {
       this._pageLabels = null;
-    } else if (
-      !(Array.isArray(labels) && this.pdfDocument.numPages === labels.length)
-    ) {
+    } else if (!(
+      Array.isArray(labels) && this.pdfDocument.numPages === labels.length
+    )) {
       this._pageLabels = null;
       console.error(`setPageLabels: Invalid page labels.`);
     } else {
@@ -1520,15 +1524,68 @@ class PDFViewer {
     );
   }
 
+  /**
+   * Scroll the viewer by the given gesture deltas: like `GrabToPan` does, the
+   * content follows the gesture.
+   * @param {number} dx - Horizontal delta.
+   * @param {number} dy - Vertical delta.
+   */
+  panBy(dx, dy) {
+    const { container } = this;
+    const position = this.#panPosition;
+    const { scrollLeft, scrollTop } = container;
+
+    // Keep the fractions which the browser dropped when it snapped the offsets
+    // to the device pixels, else they'd be lost on every move and the content
+    // would drift away from the gesture. Anything else which moved the
+    // container, e.g. a scale update or a boundary being hit, wins: the
+    // comparison is false as long as the position is unknown, hence NaN.
+    const left =
+      (Math.abs(scrollLeft - position[0]) < 1 ? position[0] : scrollLeft) - dx;
+    const top =
+      (Math.abs(scrollTop - position[1]) < 1 ? position[1] : scrollTop) - dy;
+    position[0] = left;
+    position[1] = top;
+    container.scrollLeft = left;
+    container.scrollTop = top;
+    this.#staleLocation = true;
+  }
+
+  /**
+   * Recompute `this._location` when a panning invalidated it.
+   *
+   * It's normally refreshed on an animation frame, hence panning several times
+   * in a row, e.g. once per touch move, leaves it behind: restoring the
+   * position from it would then undo those pannings.
+   */
+  #refreshLocation() {
+    if (!this.#staleLocation) {
+      return;
+    }
+    const { first } = this._getVisiblePages();
+    if (first) {
+      this._updateLocation(first);
+    }
+  }
+
   #setScaleUpdatePages(
     newScale,
     newValue,
-    { noScroll = false, preset = false, drawingDelay = -1, origin = null }
+    {
+      noScroll = false,
+      preset = false,
+      drawingDelay = -1,
+      origin = null,
+      pan = null,
+    }
   ) {
-    this.clearSelection();
     this._currentScaleValue = newValue.toString();
 
     if (this.#isSameScale(newScale)) {
+      if (pan && !noScroll) {
+        // Preserve panning when zoom is rounded or clamped away.
+        this.panBy(pan[0], pan[1]);
+      }
       if (preset) {
         this.eventBus.dispatch("scalechanging", {
           source: this,
@@ -1538,6 +1595,7 @@ class PDFViewer {
       }
       return;
     }
+    this.clearSelection();
 
     this.viewer.style.setProperty(
       "--scale-factor",
@@ -1561,6 +1619,8 @@ class PDFViewer {
     this._currentScale = newScale;
 
     if (!noScroll) {
+      this.#refreshLocation();
+
       let page = this._currentPageNumber,
         dest;
       if (
@@ -1581,14 +1641,24 @@ class PDFViewer {
         destArray: dest,
         allowNegativeOffset: true,
       });
+      // The gesture movement, if any, is applied together with the origin
+      // below: both are relative to the position which `scrollPageIntoView`
+      // just restored from `this._location`, and a single scroll update only
+      // loses the fractions once.
+      let dx = pan?.[0] ?? 0,
+        dy = pan?.[1] ?? 0;
       if (Array.isArray(origin)) {
         // If the origin of the scaling transform is specified, preserve its
         // location on screen. If not specified, scaling will fix the top-left
         // corner of the visible PDF area.
         const scaleDiff = newScale / previousScale - 1;
         const [top, left] = this.containerTopLeft;
-        this.container.scrollLeft += (origin[0] - left) * scaleDiff;
-        this.container.scrollTop += (origin[1] - top) * scaleDiff;
+        dx -= (origin[0] - left) * scaleDiff;
+        dy -= (origin[1] - top) * scaleDiff;
+      }
+      if (dx || dy) {
+        // Applied before `scalechanging` listeners update `this._location`.
+        this.panBy(dx, dy);
       }
     }
 
@@ -1604,13 +1674,10 @@ class PDFViewer {
   }
 
   get #pageWidthScaleFactor() {
-    if (
-      this._spreadMode !== SpreadMode.NONE &&
+    return this._spreadMode !== SpreadMode.NONE &&
       this._scrollMode !== ScrollMode.HORIZONTAL
-    ) {
-      return 2;
-    }
-    return 1;
+      ? 2
+      : 1;
   }
 
   #setScale(value, options) {
@@ -1704,14 +1771,11 @@ class PDFViewer {
       return null;
     }
     const i = this._pageLabels.indexOf(label);
-    if (i < 0) {
-      return null;
-    }
-    return i + 1;
+    return i < 0 ? null : i + 1;
   }
 
   /**
-   * @typedef {Object} ScrollPageIntoViewParameters
+   * @typedef {object} ScrollPageIntoViewParameters
    * @property {number} pageNumber - The page number.
    * @property {Array} [destArray] - The original PDF destination array, in the
    *   format: <page-ref> </XYZ|/FitXXX> <args..>
@@ -1880,6 +1944,8 @@ class PDFViewer {
   }
 
   _updateLocation(firstPage) {
+    this.#staleLocation = false;
+
     const currentScale = this._currentScale;
     const currentScaleValue = this._currentScaleValue;
     const normalizedScaleValue =
@@ -1894,19 +1960,20 @@ class PDFViewer {
       container.scrollLeft - firstPage.x,
       container.scrollTop - firstPage.y
     );
-    const intLeft = Math.round(topLeft[0]);
-    const intTop = Math.round(topLeft[1]);
+    const [left, top] = topLeft;
 
     let pdfOpenParams = `#page=${pageNumber}`;
     if (!this.isInPresentationMode) {
-      pdfOpenParams += `&zoom=${normalizedScaleValue},${intLeft},${intTop}`;
+      pdfOpenParams +=
+        `&zoom=${normalizedScaleValue},` +
+        `${Math.round(left)},${Math.round(top)}`;
     }
 
     this._location = {
       pageNumber,
       scale: normalizedScaleValue,
-      top: intTop,
-      left: intLeft,
+      top,
+      left,
       rotation: this._pagesRotation,
       pdfOpenParams,
     };
@@ -2008,15 +2075,17 @@ class PDFViewer {
   }
 
   get isHorizontalScrollbarEnabled() {
-    return this.isInPresentationMode
-      ? false
-      : this.container.scrollWidth > this.container.clientWidth;
+    return (
+      !this.isInPresentationMode &&
+      this.container.scrollWidth > this.container.clientWidth
+    );
   }
 
   get isVerticalScrollbarEnabled() {
-    return this.isInPresentationMode
-      ? false
-      : this.container.scrollHeight > this.container.clientHeight;
+    return (
+      !this.isInPresentationMode &&
+      this.container.scrollHeight > this.container.clientHeight
+    );
   }
 
   _getVisiblePages() {
@@ -2401,7 +2470,7 @@ class PDFViewer {
               }
             }
           } else {
-            for (let i = currentIndex + 1, ii = numPages; i < ii; i++) {
+            for (let i = currentIndex + 1; i < numPages; i++) {
               const currentId = yArray[i],
                 expectedId = yArray[i - 1] + 1;
               if (currentId > expectedId) {
@@ -2494,19 +2563,26 @@ class PDFViewer {
   }
 
   /**
-   * @typedef {Object} ChangeScaleOptions
+   * @typedef {object} ChangeScaleOptions
    * @property {number} [drawingDelay]
    * @property {number} [scaleFactor]
    * @property {number} [steps]
    * @property {Array} [origin] x and y coordinates of the scale
    *                            transformation origin.
+   * @property {Array<number>} [pan] - Horizontal and vertical gesture deltas.
    */
 
   /**
    * Changes the current zoom level by the specified amount.
    * @param {ChangeScaleOptions} [options]
    */
-  updateScale({ drawingDelay, scaleFactor = null, steps = null, origin }) {
+  updateScale({
+    drawingDelay,
+    scaleFactor = null,
+    steps = null,
+    origin,
+    pan = null,
+  }) {
     if (steps === null && scaleFactor === null) {
       throw new Error(
         "Invalid updateScale options: either `steps` or `scaleFactor` must be provided."
@@ -2527,7 +2603,7 @@ class PDFViewer {
       } while (--steps > 0);
     }
     newScale = MathClamp(newScale, MIN_SCALE, MAX_SCALE);
-    this.#setScale(newScale, { noScroll: false, drawingDelay, origin });
+    this.#setScale(newScale, { noScroll: false, drawingDelay, origin, pan });
   }
 
   /**
@@ -2612,7 +2688,7 @@ class PDFViewer {
   }
 
   /**
-   * @typedef {Object} AnnotationEditorModeOptions
+   * @typedef {object} AnnotationEditorModeOptions
    * @property {number} mode - The editor mode (none, FreeText, ink, ...).
    * @property {string|null} [editId] - ID of the existing annotation to edit.
    * @property {boolean} [isFromKeyboard] - True if the mode change is due to a

@@ -25,6 +25,7 @@ import {
   LINE_FACTOR,
   OPS,
   shadow,
+  Util,
   warn,
 } from "../shared/util.js";
 import { ColorSpaceUtils } from "./colorspace_utils.js";
@@ -144,7 +145,8 @@ class AppearanceStreamEvaluator extends EvaluatorPreprocessor {
             result = stack.pop() || result;
             break;
           case OPS.setTextMatrix:
-            result.scaleFactor *= Math.hypot(args[0], args[1]);
+            const tm = Util.transform(this.stateManager.state.ctm, args);
+            result.scaleFactor *= Math.hypot(tm[0], tm[1]);
             break;
           case OPS.setFont:
             const [fontName, fontSize] = args;
@@ -152,7 +154,7 @@ class AppearanceStreamEvaluator extends EvaluatorPreprocessor {
               result.fontName = fontName.name;
             }
             if (typeof fontSize === "number" && fontSize > 0) {
-              result.fontSize = fontSize * result.scaleFactor;
+              result.fontSize = fontSize;
             }
             break;
           case OPS.setFillColorSpace:
@@ -182,6 +184,10 @@ class AppearanceStreamEvaluator extends EvaluatorPreprocessor {
           case OPS.showSpacedText:
           case OPS.nextLineShowText:
           case OPS.nextLineSetSpacingShowText:
+            // The font (Tf) and the text matrix (Tm) can be set in any order,
+            // so the scale factor is applied here, when text is actually shown
+            // and both are known to be in effect.
+            result.fontSize *= result.scaleFactor;
             breakLoop = true;
             break;
         }
@@ -418,10 +424,7 @@ class FakeUnicodeFont {
       [w, h] = [h, w];
     }
 
-    let hscale = 1;
-    if (maxWidth > w) {
-      hscale = w / maxWidth;
-    }
+    const hscale = maxWidth > w ? w / maxWidth : 1;
     let vscale = 1;
     const lineHeight = LINE_FACTOR * fontSize;
     const lineDescent = LINE_DESCENT_FACTOR * fontSize;

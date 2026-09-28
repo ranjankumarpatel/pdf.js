@@ -66,6 +66,12 @@ class ExternalServices extends BaseExternalServices {
   createSignatureStorage(eventBus, signal) {
     return new SignatureStorage(eventBus, signal);
   }
+
+  createSignatureVerifier() {
+    return typeof PDFJSDev === "undefined" || PDFJSDev.test("TESTING")
+      ? new FakeSignatureVerifier()
+      : null;
+  }
 }
 
 class MLManager {
@@ -164,6 +170,35 @@ if (typeof PDFJSDev === "undefined" || PDFJSDev.test("TESTING")) {
 
     toggleService(_name, enabled) {
       this.enableGuessAltText = enabled;
+    }
+  };
+
+  // eslint-disable-next-line no-var
+  var FakeSignatureVerifier = class {
+    async verify(signature) {
+      if (signature.signatureType === null) {
+        return {
+          status: "unknown",
+          errorCode: "SUBFILTER_NOT_SUPPORTED",
+          message: signature.subFilter,
+          certificate: null,
+          documentModifiedAfterSigning: !signature.coversWholeDocument,
+          modificationsAfterSignature: signature.modificationsAfterSignature,
+        };
+      }
+
+      return {
+        status: "unknown",
+        errorCode: "EMPTY_RESPONSE",
+        message: null,
+        certificate: null,
+        documentModifiedAfterSigning: !signature.coversWholeDocument,
+        modificationsAfterSignature: signature.modificationsAfterSignature,
+      };
+    }
+
+    async viewCertificate(certificate) {
+      return false;
     }
   };
 }

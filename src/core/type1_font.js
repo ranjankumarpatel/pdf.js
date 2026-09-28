@@ -269,7 +269,7 @@ class Type1Font {
     const charstrings = this.charstrings;
 
     if (properties.composite) {
-      const charCodeToGlyphId = Object.create(null);
+      const charCodeToGlyphId = new Map();
       // Map CIDs directly to GIDs.
       for (
         let glyphId = 0, charstringsLen = charstrings.length;
@@ -278,7 +278,7 @@ class Type1Font {
       ) {
         const charCode = properties.cMap.charCodeOf(glyphId);
         // Add 1 because glyph 0 is duplicated.
-        charCodeToGlyphId[charCode] = glyphId + 1;
+        charCodeToGlyphId.set(charCode, glyphId + 1);
       }
       return charCodeToGlyphId;
     }
@@ -315,15 +315,15 @@ class Type1Font {
   }
 
   getSeacs(charstrings) {
-    const seacMap = [];
+    const seacs = new Map();
     for (let i = 0, ii = charstrings.length; i < ii; i++) {
-      const charstring = charstrings[i];
-      if (charstring.seac) {
+      const { seac } = charstrings[i];
+      if (seac) {
         // Offset by 1 for .notdef
-        seacMap[i + 1] = charstring.seac;
+        seacs.set(i + 1, seac);
       }
     }
-    return seacMap;
+    return seacs;
   }
 
   getType2Charstrings(type1Charstrings) {

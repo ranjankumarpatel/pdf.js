@@ -16,7 +16,7 @@
 import { shadow, Util } from "../shared/util.js";
 
 /**
- * @typedef {Object} PageViewportParameters
+ * @typedef {object} PageViewportParameters
  * @property {Array<number>} viewBox - The xMin, yMin, xMax and
  *   yMax coordinates.
  * @property {number} userUnit - The size of units.
@@ -31,7 +31,7 @@ import { shadow, Util } from "../shared/util.js";
  */
 
 /**
- * @typedef {Object} PageViewportCloneParameters
+ * @typedef {object} PageViewportCloneParameters
  * @property {number} [scale] - The scale, overriding the one in the cloned
  *   viewport. The default value is `this.scale`.
  * @property {number} [rotation] - The rotation, in degrees, overriding the one
@@ -49,7 +49,7 @@ import { shadow, Util } from "../shared/util.js";
  */
 class PageViewport {
   /**
-   * @param {PageViewportParameters}
+   * @param {PageViewportParameters} params
    */
   constructor({
     viewBox,
@@ -146,7 +146,7 @@ class PageViewport {
 
   /**
    * The original, un-scaled, viewport dimensions.
-   * @type {Object}
+   * @type {object}
    */
   get rawDims() {
     const dims = this.viewBox;
@@ -190,27 +190,11 @@ class PageViewport {
    * @returns {Array} Array containing `x`- and `y`-coordinates of the
    *   point in the viewport coordinate space.
    * @see {@link convertToPdfPoint}
-   * @see {@link convertToViewportRectangle}
    */
   convertToViewportPoint(x, y) {
     const p = [x, y];
     Util.applyTransform(p, this.transform);
     return p;
-  }
-
-  /**
-   * Converts PDF rectangle to the viewport coordinates.
-   * @param {Array} rect - The xMin, yMin, xMax and yMax coordinates.
-   * @returns {Array} Array containing corresponding coordinates of the
-   *   rectangle in the viewport coordinate space.
-   * @see {@link convertToViewportPoint}
-   */
-  convertToViewportRectangle(rect) {
-    const topLeft = [rect[0], rect[1]];
-    Util.applyTransform(topLeft, this.transform);
-    const bottomRight = [rect[2], rect[3]];
-    Util.applyTransform(bottomRight, this.transform);
-    return [topLeft[0], topLeft[1], bottomRight[0], bottomRight[1]];
   }
 
   /**

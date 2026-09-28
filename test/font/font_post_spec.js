@@ -33,7 +33,7 @@ describe("font_post", function () {
           differences: [],
           defaultEncoding: [],
           cMap,
-          toUnicode: new ToUnicodeMap([]),
+          toUnicode: new ToUnicodeMap(new Map()),
           xHeight: 0,
           capHeight: 0,
           italicAngle: 0,
@@ -43,7 +43,7 @@ describe("font_post", function () {
       const output = await ttx(font.data);
 
       verifyTtxOutput(output);
-      expect(/<post>\s*<formatType value="3\.0"\/>/.test(output)).toEqual(true);
+      expect(/<post>\s*<formatType value="3\.0"\/>/.test(output)).toBeTrue();
     });
 
     it("has invalid glyph name indexes", async function () {
@@ -55,7 +55,7 @@ describe("font_post", function () {
           type: "TrueType",
           differences: [],
           defaultEncoding: [],
-          toUnicode: new ToUnicodeMap([]),
+          toUnicode: new ToUnicodeMap(new Map()),
           xHeight: 0,
           capHeight: 0,
           italicAngle: 0,
@@ -65,7 +65,7 @@ describe("font_post", function () {
       const output = await ttx(font.data);
 
       verifyTtxOutput(output);
-      expect(/<post>\s*<formatType value="3\.0"\/>/.test(output)).toEqual(true);
+      expect(/<post>\s*<formatType value="3\.0"\/>/.test(output)).toBeTrue();
     });
 
     it("has right amount of glyphs specified", async function () {
@@ -77,7 +77,7 @@ describe("font_post", function () {
           type: "TrueType",
           differences: [],
           defaultEncoding: [],
-          toUnicode: new ToUnicodeMap([]),
+          toUnicode: new ToUnicodeMap(new Map()),
           xHeight: 0,
           capHeight: 0,
           italicAngle: 0,
@@ -87,7 +87,7 @@ describe("font_post", function () {
       const output = await ttx(font.data);
 
       verifyTtxOutput(output);
-      expect(/<post>\s*<formatType value="3\.0"\/>/.test(output)).toEqual(true);
+      expect(/<post>\s*<formatType value="3\.0"\/>/.test(output)).toBeTrue();
     });
   });
 });

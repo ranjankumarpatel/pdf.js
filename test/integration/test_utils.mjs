@@ -13,15 +13,30 @@
  * limitations under the License.
  */
 
+import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { mergeCoverageIntoGlobal } from "../coverage_utils.js";
 import os from "os";
 
 const isMac = os.platform() === "darwin";
 
+/**
+ * Decode PNG data into RGBA pixels.
+ * @param {Uint8Array} data
+ * @returns {Promise<{width: number, height: number, data: Uint8ClampedArray}>}
+ */
+async function decodePNG(data) {
+  const image = await loadImage(data);
+  const { width, height } = image;
+  const ctx = createCanvas(width, height).getContext("2d");
+  ctx.drawImage(image, 0, 0);
+  return { width, height, data: ctx.getImageData(0, 0, width, height).data };
+}
+
 function loadAndWait(filename, selector, zoom, setups, options, viewport) {
   return Promise.all(
     global.integrationSessions.map(async session => {
       const page = await session.browser.newPage();
+      settleEditorBeforeInput(page);
 
       if (viewport) {
         await page.setViewport(viewport);
@@ -31,14 +46,10 @@ function loadAndWait(filename, selector, zoom, setups, options, viewport) {
       // a locale.
       await page.evaluateOnNewDocument(() => {
         Object.defineProperty(navigator, "language", {
-          get() {
-            return "en-US";
-          },
+          get: () => "en-US",
         });
         Object.defineProperty(navigator, "languages", {
-          get() {
-            return ["en-US", "en"];
-          },
+          get: () => ["en-US", "en"],
         });
       });
 
@@ -79,9 +90,7 @@ function loadAndWait(filename, selector, zoom, setups, options, viewport) {
               let app;
               let eventBus;
               Object.defineProperty(window, "PDFViewerApplication", {
-                get() {
-                  return app;
-                },
+                get: () => app,
                 set(newValue) {
                   app = newValue;
                   if (aSetup) {
@@ -89,9 +98,7 @@ function loadAndWait(filename, selector, zoom, setups, options, viewport) {
                     eval(`(${aSetup})`)(app);
                   }
                   Object.defineProperty(app, "eventBus", {
-                    get() {
-                      return eventBus;
-                    },
+                    get: () => eventBus,
                     set(newV) {
                       eventBus = newV;
                       if (evSetup) {
@@ -151,19 +158,6 @@ function closePages(pages) {
 
 async function closeSinglePage(page) {
   const coverage = await page.evaluate(async () => {
-    // Collect coverage data from the worker before the document is closed.
-    let workerCoverage = null;
-    const handler =
-      window.PDFViewerApplication.pdfDocument?._transport?.messageHandler;
-    if (handler) {
-      try {
-        workerCoverage = await handler.sendWithPromise(
-          "GetWorkerCoverage",
-          null
-        );
-      } catch {}
-    }
-
     // Close the viewer gracefully, and clear local storage to avoid state
     // leaking from one test to another.
     await window.PDFViewerApplication.testingClose();
@@ -175,16 +169,14 @@ async function closeSinglePage(page) {
     // logic kicks in (see https://github.com/puppeteer/puppeteer/issues/2427).
     return {
       page: window.__coverage__ ? JSON.stringify(window.__coverage__) : null,
-      worker: workerCoverage ? JSON.stringify(workerCoverage) : null,
+      workers: window.__worker_coverage__?.map(c => JSON.stringify(c)) ?? null,
     };
   });
 
   if (coverage.page) {
     mergeCoverageIntoGlobal(JSON.parse(coverage.page));
   }
-  if (coverage.worker) {
-    mergeCoverageIntoGlobal(JSON.parse(coverage.worker));
-  }
+  coverage.workers?.map(c => mergeCoverageIntoGlobal(JSON.parse(c)));
 
   await page.close({ runBeforeUnload: false });
 }
@@ -336,8 +328,10 @@ async function waitForEvent({
               if (timeoutId) {
                 clearTimeout(timeoutId);
               }
+              /* eslint-disable unicorn/prefer-logical-operator-over-ternary */
               // eslint-disable-next-line no-eval
               resolve(validate ? eval(`(${validate})`)(e) : true);
+              /* eslint-enable unicorn/prefer-logical-operator-over-ternary */
             };
             element.addEventListener(name, callback, { once: true });
           }),
@@ -615,6 +609,77 @@ async function dragAndDrop(page, selector, translations, steps = 1) {
   await page.waitForSelector("#viewer:not(.noUserSelect)");
 }
 
+// Move two fingers, horizontally centered on (centerX, centerY), from startGap
+// to endGap: it's a pinch out when endGap is larger than startGap.
+// Keep in mind that `TouchManager` starts to pinch only once the distance
+// between the two fingers changed by more than `MIN_TOUCH_DISTANCE_TO_PINCH`
+// (35 CSS pixels), hence the first moves are swallowed and the resulting zoom
+// factor is smaller than endGap / startGap.
+// Explicit start/end points can be used for tests which need an asymmetric
+// gesture, or hooks around each touch lifetime.
+async function pinch(
+  page,
+  {
+    afterEnd = null,
+    afterFirstEnd = null,
+    afterFirstStart = null,
+    afterStart = null,
+    beforeEnd = null,
+    centerX = 0,
+    centerY = 0,
+    centerDeltaX = 0,
+    centerDeltaY = 0,
+    startGap = 0,
+    endGap = startGap,
+    endPoints = null,
+    startPoints = null,
+    steps = 12,
+  }
+) {
+  const normalizePoint = point =>
+    Array.isArray(point) ? { x: point[0], y: point[1] } : point;
+  const start = (
+    startPoints || [
+      { x: centerX - startGap, y: centerY },
+      { x: centerX + startGap, y: centerY },
+    ]
+  ).map(normalizePoint);
+  let end;
+  if (endPoints) {
+    end = endPoints.map(normalizePoint);
+  } else if (startPoints) {
+    end = start;
+  } else {
+    end = [
+      { x: centerX + centerDeltaX - endGap, y: centerY + centerDeltaY },
+      { x: centerX + centerDeltaX + endGap, y: centerY + centerDeltaY },
+    ];
+  }
+
+  const finger0 = await page.touchscreen.touchStart(start[0].x, start[0].y);
+  await afterFirstStart?.(finger0);
+  const finger1 = await page.touchscreen.touchStart(start[1].x, start[1].y);
+  await afterStart?.([finger0, finger1]);
+
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    await finger0.move(
+      start[0].x + (end[0].x - start[0].x) * t,
+      start[0].y + (end[0].y - start[0].y) * t
+    );
+    await finger1.move(
+      start[1].x + (end[1].x - start[1].x) * t,
+      start[1].y + (end[1].y - start[1].y) * t
+    );
+  }
+
+  await beforeEnd?.([finger0, finger1]);
+  await finger0.end();
+  await afterFirstEnd?.([finger0, finger1]);
+  await finger1.end();
+  await afterEnd?.([finger0, finger1]);
+}
+
 function waitForPageChanging(page) {
   return createPromise(page, resolve => {
     window.PDFViewerApplication.eventBus.on("pagechanging", resolve, {
@@ -669,6 +734,37 @@ function waitForEditorMovedInDOM(page) {
       once: true,
     });
   });
+}
+
+/**
+ * Wait two timer turns for deferred editor DOM and focus updates.
+ */
+function waitForEditorFocusSettled(page) {
+  return page.evaluate(
+    () =>
+      new Promise(resolve => {
+        setTimeout(() => setTimeout(resolve, 0), 0);
+      })
+  );
+}
+
+/**
+ * Wait for deferred editor updates before input or focus.
+ */
+function settleEditorBeforeInput(page) {
+  for (const [target, names] of [
+    [page.keyboard, ["down", "up", "press", "type", "sendCharacter"]],
+    [page.mouse, ["down", "click"]],
+    [page, ["focus"]],
+  ]) {
+    for (const name of names) {
+      const method = target[name].bind(target);
+      target[name] = async (...args) => {
+        await waitForEditorFocusSettled(page);
+        return method(...args);
+      };
+    }
+  }
 }
 
 async function scrollIntoView(page, selector) {
@@ -1010,11 +1106,13 @@ function isCanvasMonochrome(page, pageNumber, rectangle, color) {
       const canvasRect = canvas.getBoundingClientRect();
       const ctx = canvas.getContext("2d");
       rect ||= canvasRect;
+      // The canvas is scaled by the devicePixelRatio: convert from CSS pixels.
+      const scale = canvas.width / canvasRect.width;
       const { data } = ctx.getImageData(
-        rect.x - canvasRect.x,
-        rect.y - canvasRect.y,
-        rect.width,
-        rect.height
+        Math.round((rect.x - canvasRect.x) * scale),
+        Math.round((rect.y - canvasRect.y) * scale),
+        Math.round(rect.width * scale),
+        Math.round(rect.height * scale)
       );
       return new Uint32Array(data.buffer).every(x => x === col);
     },
@@ -1077,18 +1175,23 @@ async function highlightSpan(
 }
 
 async function showViewsManager(page) {
-  const hasAnimations = await page.evaluate(
-    () => !window.matchMedia("(prefers-reduced-motion: reduce)").matches
-  );
-  const movingPromise = hasAnimations
-    ? page.waitForSelector("#outerContainer.viewsManagerMoving", {
-        visible: true,
-      })
-    : Promise.resolve();
+  // Opening dispatches this event synchronously when animations are disabled,
+  // so install the listener before clicking the toggle button. With animations,
+  // it's dispatched once the transition has ended and the moving class has
+  // been removed.
+  const openedHandle = await createPromise(page, resolve => {
+    const { eventBus, viewsManager } = window.PDFViewerApplication;
+    const onResize = ({ source }) => {
+      if (source !== viewsManager) {
+        return;
+      }
+      eventBus.off("resize", onResize);
+      resolve();
+    };
+    eventBus.on("resize", onResize);
+  });
   await page.click("#viewsManagerToggleButton");
-  if (hasAnimations) {
-    await movingPromise;
-  }
+  await awaitPromise(openedHandle);
   await page.waitForSelector("#viewsManager", { visible: true });
   await page.waitForSelector(
     "#outerContainer:not(.viewsManagerMoving).viewsManagerOpen",
@@ -1108,6 +1211,15 @@ async function waitForBrowserTrip(page) {
   await awaitPromise(handle);
 }
 
+function waitForSelectionChange(page, selection) {
+  return page.waitForFunction(
+    // We need to replace EOL on Windows to make the test pass.
+    sel => document.getSelection().toString().replaceAll("\r\n", "\n") === sel,
+    {},
+    selection
+  );
+}
+
 // Unicode bidi isolation characters, Fluent adds these markers to the text.
 const FSI = "\u2068";
 const PDI = "\u2069";
@@ -1125,6 +1237,7 @@ export {
   countStorageEntries,
   createPromise,
   createPromiseWithArgs,
+  decodePNG,
   dragAndDrop,
   firstPageOnTop,
   FSI,
@@ -1169,6 +1282,7 @@ export {
   paste,
   pasteFromClipboard,
   PDI,
+  pinch,
   scrollIntoView,
   selectEditor,
   selectEditors,
@@ -1190,6 +1304,7 @@ export {
   waitForPointerUp,
   waitForSandboxTrip,
   waitForSelectedEditor,
+  waitForSelectionChange,
   waitForSerialized,
   waitForStorageEntries,
   waitForTextToBe,

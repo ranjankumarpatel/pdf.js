@@ -14,19 +14,26 @@
  */
 
 /**
- * @import { Page } from "puppeteer"
+ * @import { Browser, Page } from "puppeteer"
  */
 
 import {
+  browserCloseTimeout,
+  browserTimeout,
+  killBrowser,
+  startBrowser,
+} from "../test.mjs";
+import {
   closePages,
   closeSinglePage,
+  firstPageOnTop,
   getSpanRectFromText,
   kbSelectAll,
   loadAndWait,
+  scrollIntoView,
   waitForEvent,
 } from "./test_utils.mjs";
 import { MathClamp } from "../../src/shared/math_clamp.js";
-import { startBrowser } from "../test.mjs";
 
 /**
  * @typedef Point
@@ -47,6 +54,36 @@ import { startBrowser } from "../test.mjs";
  * @property {Rect} rect
  * @property {string} text
  */
+
+// These suites require Firefox profile preferences and a dedicated browser, so
+// exclude them when Firefox is disabled.
+const describeFirefoxOnly = global.integrationSessions.some(
+  session => session.browserType === "firefox"
+)
+  ? describe
+  : xdescribe;
+
+// Allow one protocol timeout, the close fallback, and a 10-second margin.
+const DEDICATED_BROWSER_TIMEOUT =
+  (browserTimeout + browserCloseTimeout + 10) * 1000;
+
+function dedicatedBrowserTest(description, test) {
+  it(description, test, DEDICATED_BROWSER_TIMEOUT);
+}
+
+/**
+ * @param {Browser} [browser]
+ * @param {Page} [page]
+ */
+async function closeDedicatedBrowser(browser, page) {
+  try {
+    if (page) {
+      await closeSinglePage(page);
+    }
+  } finally {
+    await killBrowser(browser);
+  }
+}
 
 describe("Text layer", () => {
   describe("Text layout", () => {
@@ -142,7 +179,6 @@ describe("Text layer", () => {
 
     /**
      * Pick a point outside the page while remaining inside the viewer.
-     *
      * @param {Rect} page
      *   Page rectangle.
      * @param {Rect} viewer
@@ -195,7 +231,6 @@ describe("Text layer", () => {
 
     /**
      * Get current selection.
-     *
      * @param {Page} page
      * @returns {Promise<string>}
      */
@@ -207,7 +242,6 @@ describe("Text layer", () => {
 
     /**
      * Check if the draw layer contains a non-empty selection.
-     *
      * @param {Page} page
      * @returns {Promise<boolean>}
      */
@@ -227,7 +261,6 @@ describe("Text layer", () => {
 
     /**
      * Get the first non-empty text span on a page.
-     *
      * @param {Page} page
      * @param {number} pageNumber
      * @returns {Promise<SpanInfo | null>}
@@ -253,7 +286,6 @@ describe("Text layer", () => {
 
     /**
      * Get the last non-empty text span on a page.
-     *
      * @param {Page} page
      * @param {number} pageNumber
      * @returns {Promise<SpanInfo | null>}
@@ -282,43 +314,41 @@ describe("Text layer", () => {
       jasmine.addAsyncMatchers({
         // Check that a page has a selection containing the given text, with
         // some tolerance for extra characters before/after.
-        toHaveRoughlySelected({ pp }) {
-          return {
-            async compare(page, expected) {
-              const TOLERANCE = 10;
-              const actual = await getSelectionText(page);
+        toHaveRoughlySelected: ({ pp }) => ({
+          async compare(page, expected) {
+            const TOLERANCE = 10;
+            const actual = await getSelectionText(page);
 
-              let start, end;
-              if (expected instanceof RegExp) {
-                const match = expected.exec(actual);
-                start = -1;
-                if (match) {
-                  start = match.index;
-                  end = start + match[0].length;
-                }
-              } else {
-                start = actual.indexOf(expected);
-                if (start !== -1) {
-                  end = start + expected.length;
-                }
+            let start, end;
+            if (expected instanceof RegExp) {
+              const match = expected.exec(actual);
+              start = -1;
+              if (match) {
+                start = match.index;
+                end = start + match[0].length;
               }
+            } else {
+              start = actual.indexOf(expected);
+              if (start !== -1) {
+                end = start + expected.length;
+              }
+            }
 
-              const pass =
-                start !== -1 &&
-                start < TOLERANCE &&
-                end > actual.length - TOLERANCE;
+            const pass =
+              start !== -1 &&
+              start < TOLERANCE &&
+              end > actual.length - TOLERANCE;
 
-              return {
-                pass,
-                message: `Expected ${pp(
-                  actual.length > 200
-                    ? actual.slice(0, 100) + "[...]" + actual.slice(-100)
-                    : actual
-                )} to ${pass ? "not " : ""}roughly match ${pp(expected)}.`,
-              };
-            },
-          };
-        },
+            return {
+              pass,
+              message: `Expected ${pp(
+                actual.length > 200
+                  ? actual.slice(0, 100) + "[...]" + actual.slice(-100)
+                  : actual
+              )} to ${pass ? "not " : ""}roughly match ${pp(expected)}.`,
+            };
+          },
+        }),
       });
     });
 
@@ -757,7 +787,7 @@ describe("Text layer", () => {
                 .withContext(`In ${browserName}`)
                 .toHaveRoughlySelected(
                   "rs as the railway projects under\n" +
-                    "development enter the construction phase (estimated at"
+                    "development enter the construction phase (estimated a"
                 );
             })
           );
@@ -801,7 +831,7 @@ describe("Text layer", () => {
                 .withContext(`In ${browserName}`)
                 .toHaveRoughlySelected(
                   "quarters as the railway projects under\n" +
-                    "development enter the construction phase (estimated at around"
+                    "development enter the construction phase (estimated at"
                 );
             })
           );
@@ -1082,9 +1112,165 @@ describe("Text layer", () => {
           );
         });
       });
+
+      describe("when `backdrop-filter` is unsupported", () => {
+        let pages;
+
+        beforeEach(async () => {
+          pages = await loadAndWait(
+            "tracemonkey.pdf",
+            `.page[data-page-number = "1"] .endOfContent`,
+            undefined,
+            {
+              /* eslint-disable unicorn/prefer-logical-operator-over-ternary */
+              prePageSetup: page =>
+                page.evaluateOnNewDocument(() => {
+                  const { supports } = CSS;
+                  CSS.supports = (property, value) =>
+                    property === "backdrop-filter"
+                      ? false
+                      : supports.call(CSS, property, value);
+                }),
+              /* eslint-enable unicorn/prefer-logical-operator-over-ternary */
+            },
+            (_page, browserName) => ({
+              imagesRightClickMinSize: browserName === "firefox" ? 16 : -1,
+            })
+          );
+        });
+
+        afterEach(async () => {
+          await closePages(pages);
+        });
+
+        it("does not render a selection overlay in the draw layer", async () => {
+          await Promise.all(
+            pages.map(async ([browserName, page]) => {
+              const [positionStart, positionEnd] = await Promise.all([
+                getSpanRectFromText(
+                  page,
+                  1,
+                  "(frequently executed) bytecode sequences, records"
+                ).then(middlePosition),
+                getSpanRectFromText(
+                  page,
+                  1,
+                  "them, and compiles them to fast native code. We call such a se-"
+                ).then(belowEndPosition),
+              ]);
+
+              await page.mouse.move(positionStart.x, positionStart.y);
+              await page.mouse.down();
+              await moveInSteps(page, positionStart, positionEnd, 20);
+              await page.mouse.up();
+
+              // Text should still be selectable.
+              const selectedText = await getSelectionText(page);
+              expect(selectedText.length)
+                .withContext(`In ${browserName}, text is still selectable`)
+                .toBeGreaterThan(0);
+
+              // But no selection overlay should appear in the draw layer.
+              expect(await hasDrawnSelection(page))
+                .withContext(
+                  `In ${browserName}, no selection drawn without backdrop-filter`
+                )
+                .toBeFalse();
+            })
+          );
+        });
+      });
+
+      describe("when the page has been destroyed and rendered again", () => {
+        const selectionSelector = ".canvasWrapper .selection svg path[d]";
+        const timeout = 5000;
+
+        let pages;
+
+        beforeEach(async () => {
+          pages = await loadAndWait(
+            "tracemonkey.pdf",
+            `.page[data-page-number = "1"] .endOfContent`,
+            undefined,
+            undefined,
+            { annotationEditorMode: -1 }
+          );
+        });
+
+        afterEach(async () => {
+          await closePages(pages);
+        });
+
+        async function selectSomeText(page) {
+          const [positionStart, positionEnd] = await Promise.all([
+            getSpanRectFromText(
+              page,
+              1,
+              "(frequently executed) bytecode sequences, records"
+            ).then(middlePosition),
+            getSpanRectFromText(
+              page,
+              1,
+              "them, and compiles them to fast native code. We call such a se-"
+            ).then(belowEndPosition),
+          ]);
+
+          await page.mouse.move(positionStart.x, positionStart.y);
+          await page.mouse.down();
+          await moveInSteps(page, positionStart, positionEnd, 20);
+          await page.mouse.up();
+        }
+
+        it("must draw the selection", async () => {
+          await Promise.all(
+            pages.map(async ([browserName, page]) => {
+              await selectSomeText(page);
+              await page.waitForSelector(selectionSelector, { timeout });
+
+              await page.evaluate(() => {
+                document.getSelection().removeAllRanges();
+              });
+              await page.waitForSelector(selectionSelector, {
+                hidden: true,
+                timeout,
+              });
+
+              // Scroll down, page by page, until the first page view is
+              // evicted from the buffer: its canvas wrapper is then removed.
+              const pagesCount = await page.evaluate(
+                () => window.PDFViewerApplication.pagesCount
+              );
+              let isDestroyed = false;
+              for (let i = 2; i <= pagesCount && !isDestroyed; i++) {
+                const selector = `.page[data-page-number = "${i}"]`;
+                await scrollIntoView(page, selector);
+                await page.waitForSelector(
+                  `${selector} .canvasWrapper canvas`,
+                  { timeout: 0 }
+                );
+                isDestroyed = !(await page.$(
+                  `.page[data-page-number = "1"] .canvasWrapper`
+                ));
+              }
+
+              expect(isDestroyed)
+                .withContext(`In ${browserName}, first page destroyed`)
+                .toBeTrue();
+
+              await firstPageOnTop(page);
+              await page.waitForSelector(
+                `.page[data-page-number = "1"] .canvasWrapper canvas`,
+                { timeout: 0 }
+              );
+              await selectSomeText(page);
+              await page.waitForSelector(selectionSelector, { timeout });
+            })
+          );
+        });
+      });
     });
 
-    describe("using selection carets", () => {
+    describeFirefoxOnly("using selection carets", () => {
       let browser;
       let page;
 
@@ -1108,14 +1294,13 @@ describe("Text layer", () => {
           `.page[data-page-number = "1"] .endOfContent`,
           { timeout: 0 }
         );
-      });
+      }, DEDICATED_BROWSER_TIMEOUT);
 
       afterEach(async () => {
-        await closeSinglePage(page);
-        await browser.close();
-      });
+        await closeDedicatedBrowser(browser, page);
+      }, DEDICATED_BROWSER_TIMEOUT);
 
-      it("doesn't jump when moving selection", async () => {
+      dedicatedBrowserTest("doesn't jump when moving selection", async () => {
         const [initialStart, initialEnd, finalEnd] = await Promise.all([
           getSpanRectFromText(
             page,
@@ -1182,7 +1367,6 @@ describe("Text layer", () => {
       /**
        * Return the set of page numbers that have a non-empty selection
        * overlay path in their draw layer.
-       *
        * @param {Page} page
        * @returns {Promise<Array<number>>}
        */
@@ -1312,7 +1496,7 @@ describe("Text layer", () => {
     });
   });
 
-  describe("when the browser enforces a minimum font size", () => {
+  describeFirefoxOnly("when the browser enforces a minimum font size", () => {
     let browser;
     let page;
 
@@ -1333,14 +1517,13 @@ describe("Text layer", () => {
         `.page[data-page-number = "1"] .endOfContent`,
         { timeout: 0 }
       );
-    });
+    }, DEDICATED_BROWSER_TIMEOUT);
 
     afterEach(async () => {
-      await closeSinglePage(page);
-      await browser.close();
-    });
+      await closeDedicatedBrowser(browser, page);
+    }, DEDICATED_BROWSER_TIMEOUT);
 
-    it("renders spans with the right size", async () => {
+    dedicatedBrowserTest("renders spans with the right size", async () => {
       const rect = await getSpanRectFromText(
         page,
         1,
@@ -1352,6 +1535,32 @@ describe("Text layer", () => {
 
       expect(getPercentDiff(rect.width, 315)).toBeLessThan(0.03);
       expect(getPercentDiff(rect.height, 12)).toBeLessThan(0.03);
+    });
+  });
+
+  describe("marked-content nesting (bug 1898053)", () => {
+    let pages;
+
+    beforeAll(async () => {
+      pages = await loadAndWait(
+        "bug1898053_minimal.pdf",
+        ".textLayer .endOfContent"
+      );
+    });
+    afterAll(async () => {
+      await closePages(pages);
+    });
+
+    it("must keep auto-closed sections at the text-layer root", async () => {
+      await Promise.all(
+        pages.map(async ([browserName, page]) => {
+          const count = await page.evaluate(
+            () =>
+              document.querySelectorAll(".textLayer > .markedContent").length
+          );
+          expect(count).toBe(6);
+        })
+      );
     });
   });
 });

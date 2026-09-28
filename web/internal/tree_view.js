@@ -23,7 +23,6 @@ const REF_RE = /^\d+ \d+ R$/;
 
 /**
  * Renders and manages the PDF internal structure tree.
- *
  * @param {HTMLElement} treeEl
  * @param {object}      options
  * @param {Function}    options.onMarkLoading  Called with +1/-1 to track
@@ -702,10 +701,9 @@ class TreeView {
     if (typeof value === "number") {
       return this.#makeSpan("num-value", String(value));
     }
-    if (typeof value === "boolean") {
-      return this.#makeSpan("bool-value", String(value));
-    }
-    return this.#makeSpan("null-value", "null");
+    return typeof value === "boolean"
+      ? this.#makeSpan("bool-value", String(value))
+      : this.#makeSpan("null-value", "null");
   }
 
   /**
@@ -733,11 +731,9 @@ class TreeView {
         spinner.textContent = "Loading…";
         childrenEl.append(spinner);
         this.#onMarkLoading(1);
-        if (!this.#refCache.has(cacheKey)) {
-          this.#refCache.set(cacheKey, doc.getRawData({ ref }));
-        }
+
         this.#refCache
-          .get(cacheKey)
+          .getOrInsertComputed(cacheKey, () => doc.getRawData({ ref }))
           .then(result => {
             childrenEl.replaceChildren();
             this.#buildChildren(result, doc, childrenEl);

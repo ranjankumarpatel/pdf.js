@@ -26,10 +26,7 @@ const dimConverters = {
 const measurementPattern = /([+-]?\d+\.?\d*)(.*)/;
 
 function stripQuotes(str) {
-  if (str.startsWith("'") || str.startsWith('"')) {
-    return str.slice(1, -1);
-  }
-  return str;
+  return str.startsWith("'") || str.startsWith('"') ? str.slice(1, -1) : str;
 }
 
 function getInteger({ data, defaultValue, validate }) {
@@ -38,10 +35,7 @@ function getInteger({ data, defaultValue, validate }) {
   }
   data = data.trim();
   const n = parseInt(data, 10);
-  if (!isNaN(n) && validate(n)) {
-    return n;
-  }
-  return defaultValue;
+  return !isNaN(n) && validate(n) ? n : defaultValue;
 }
 
 function getFloat({ data, defaultValue, validate }) {
@@ -50,10 +44,7 @@ function getFloat({ data, defaultValue, validate }) {
   }
   data = data.trim();
   const n = parseFloat(data);
-  if (!isNaN(n) && validate(n)) {
-    return n;
-  }
-  return defaultValue;
+  return !isNaN(n) && validate(n) ? n : defaultValue;
 }
 
 function getKeyword({ data, defaultValue, validate }) {
@@ -61,10 +52,7 @@ function getKeyword({ data, defaultValue, validate }) {
     return defaultValue;
   }
   data = data.trim();
-  if (validate(data)) {
-    return data;
-  }
-  return defaultValue;
+  return validate(data) ? data : defaultValue;
 }
 
 function getStringOption(data, options) {
@@ -95,11 +83,7 @@ function getMeasurement(str, def = "0") {
   }
 
   const conv = dimConverters[unit];
-  if (conv) {
-    return conv(value);
-  }
-
-  return value;
+  return conv ? conv(value) : value;
 }
 
 function getRatio(data) {
@@ -140,10 +124,10 @@ function getColor(data, def = [0, 0, 0]) {
   if (!data) {
     return { r, g, b };
   }
-  const color = data
-    .split(",", 3)
-    .map(c => MathClamp(parseInt(c.trim(), 10), 0, 255))
-    .map(c => (isNaN(c) ? 0 : c));
+  const color = data.split(",", 3).map(c => {
+    c = parseInt(c.trim(), 10);
+    return isNaN(c) ? 0 : MathClamp(c, 0, 255);
+  });
 
   if (color.length < 3) {
     return { r, g, b };

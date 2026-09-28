@@ -101,65 +101,74 @@ function recoverGlyphName(name, glyphsUnicodeMap) {
 /**
  * Shared logic for building a char code to glyph id mapping for Type1 and
  * simple CFF fonts. See section 9.6.6.2 of the spec.
- * @param {Object} properties Font properties object.
- * @param {Object} builtInEncoding The encoding contained within the actual font
+ * @param {object} properties Font properties object.
+ * @param {object} builtInEncoding The encoding contained within the actual font
  *   data.
  * @param {Array} glyphNames Array of glyph names where the index is the
  *   glyph ID.
- * @returns {Object} A char code to glyph ID map.
+ * @returns {Map} A char code to glyph ID map.
  */
 function type1FontGlyphMapping(properties, builtInEncoding, glyphNames) {
-  const charCodeToGlyphId = Object.create(null);
-  let glyphId, charCode, baseEncoding;
+  const charCodeToGlyphId = new Map();
+  let glyphId, baseEncoding;
   const isSymbolicFont = !!(properties.flags & FontFlags.Symbolic);
 
   if (properties.isInternalFont) {
     baseEncoding = builtInEncoding;
-    for (charCode = 0; charCode < baseEncoding.length; charCode++) {
+    for (let charCode = 0; charCode < baseEncoding.length; charCode++) {
       glyphId = glyphNames.indexOf(baseEncoding[charCode]);
-      charCodeToGlyphId[charCode] = glyphId >= 0 ? glyphId : /* notdef = */ 0;
+      charCodeToGlyphId.set(
+        charCode,
+        glyphId >= 0 ? glyphId : /* notdef = */ 0
+      );
     }
   } else if (properties.baseEncodingName) {
     // If a valid base encoding name was used, the mapping is initialized with
     // that.
     baseEncoding = getEncoding(properties.baseEncodingName);
-    for (charCode = 0; charCode < baseEncoding.length; charCode++) {
+    for (let charCode = 0; charCode < baseEncoding.length; charCode++) {
       glyphId = glyphNames.indexOf(baseEncoding[charCode]);
-      charCodeToGlyphId[charCode] = glyphId >= 0 ? glyphId : /* notdef = */ 0;
+      charCodeToGlyphId.set(
+        charCode,
+        glyphId >= 0 ? glyphId : /* notdef = */ 0
+      );
     }
   } else if (isSymbolicFont) {
     // For a symbolic font the encoding should be the fonts built-in encoding.
-    for (charCode in builtInEncoding) {
-      charCodeToGlyphId[charCode] = builtInEncoding[charCode];
+    for (const charCode in builtInEncoding) {
+      charCodeToGlyphId.set(+charCode, builtInEncoding[charCode]);
     }
   } else {
     // For non-symbolic fonts that don't have a base encoding the standard
     // encoding should be used.
     baseEncoding = StandardEncoding;
-    for (charCode = 0; charCode < baseEncoding.length; charCode++) {
+    for (let charCode = 0; charCode < baseEncoding.length; charCode++) {
       glyphId = glyphNames.indexOf(baseEncoding[charCode]);
-      charCodeToGlyphId[charCode] = glyphId >= 0 ? glyphId : /* notdef = */ 0;
+      charCodeToGlyphId.set(
+        charCode,
+        glyphId >= 0 ? glyphId : /* notdef = */ 0
+      );
     }
   }
 
   // Lastly, merge in the differences.
-  const differences = properties.differences;
   let glyphsUnicodeMap;
-  if (differences) {
-    for (charCode in differences) {
-      const glyphName = differences[charCode];
+  if (properties.differences) {
+    for (const [charCode, glyphName] of properties.differences) {
       glyphId = glyphNames.indexOf(glyphName);
 
       if (glyphId === -1) {
-        if (!glyphsUnicodeMap) {
-          glyphsUnicodeMap = getGlyphsUnicode();
-        }
+        glyphsUnicodeMap ??= getGlyphsUnicode();
+
         const standardGlyphName = recoverGlyphName(glyphName, glyphsUnicodeMap);
         if (standardGlyphName !== glyphName) {
           glyphId = glyphNames.indexOf(standardGlyphName);
         }
       }
-      charCodeToGlyphId[charCode] = glyphId >= 0 ? glyphId : /* notdef = */ 0;
+      charCodeToGlyphId.set(
+        charCode,
+        glyphId >= 0 ? glyphId : /* notdef = */ 0
+      );
     }
   }
   return charCodeToGlyphId;

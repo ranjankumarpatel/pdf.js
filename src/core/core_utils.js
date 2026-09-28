@@ -18,12 +18,12 @@ import {
   assert,
   BaseException,
   makeArr,
-  objectSize,
   Util,
   warn,
 } from "../shared/util.js";
 import { Dict, isName, isRefsEqual, Name, Ref, RefSet } from "./primitives.js";
 import { BaseStream } from "./base_stream.js";
+import { CONTROL_CHAR_REGEXP } from "../shared/css_utils.js";
 import { stringToPDFString } from "./string_utils.js";
 
 const PDF_VERSION_REGEXP = /^[1-9]\.\d$/;
@@ -48,11 +48,11 @@ const RESOURCES_KEYS_TEXT_CONTENT = [
   "XObject",
 ];
 
-function getLookupTableFactory(initializer) {
+function getLookupTableFactory(initializer, useArray = false) {
   let lookup;
   return function () {
     if (initializer) {
-      lookup = Object.create(null);
+      lookup = useArray ? [] : Object.create(null);
       initializer(lookup);
       initializer = null;
     }
@@ -141,15 +141,15 @@ async function fetchBinaryData(url) {
  * If the key is not found in the tree, `undefined` is returned. Otherwise,
  * the value for the key is returned or, if `stopWhenFound` is `false`, a list
  * of values is returned.
- *
- * @param {Dict} dict - Dictionary from where to start the traversal.
- * @param {string} key - The key of the property to find the value for.
- * @param {boolean} getArray - Whether or not the value should be fetched as an
- *   array. The default value is `false`.
- * @param {boolean} stopWhenFound - Whether or not to stop the traversal when
- *   the key is found. If set to `false`, we always walk up the entire parent
- *   chain, for example to be able to find `\Resources` placed on multiple
- *   levels of the tree. The default value is `true`.
+ * @param {object} params
+ * @param {Dict} params.dict - Dictionary from where to start the traversal.
+ * @param {string} params.key - The key of the property to find the value for.
+ * @param {boolean} params.getArray - Whether or not the value should be fetched
+ *   as an array. The default value is `false`.
+ * @param {boolean} params.stopWhenFound - Whether or not to stop the traversal
+ *   when the key is found. If set to `false`, we always walk up the entire
+ *   parent chain, for example to be able to find `\Resources` placed on
+ *   multiple levels of the tree. The default value is `true`.
  */
 function getInheritableProperty({
   dict,
@@ -178,7 +178,6 @@ function getInheritableProperty({
 
 /**
  * Get the parent dictionary to update when a property is set.
- *
  * @param {Dict} dict - Dictionary from where to start the traversal.
  * @param {Ref} ref - The reference to the dictionary.
  * @param {XRef} xref - The `XRef` instance.
@@ -336,19 +335,18 @@ function lookupNormalRect(arr, fallback) {
  * AcroForm field names use an array like notation to refer to
  * repeated XFA elements e.g. foo.bar[nnn].
  * see: XFA Spec Chapter 3 - Repeated Elements
- *
  * @param {string} path - XFA path name.
  * @returns {Array} - Array of Objects with the name and pos of
  * each part of the path.
  */
 function parseXFAPath(path) {
-  const positionPattern = /(.+)\[(\d+)\]$/;
+  // Anchoring prevents retrying the match at every character.
+  const positionPattern = /^(.+)\[(\d+)\]$/;
   return path.split(".").map(component => {
     const m = component.match(positionPattern);
-    if (m) {
-      return { name: m[1], pos: parseInt(m[2], 10) };
-    }
-    return { name: component, pos: 0 };
+    return m
+      ? { name: m[1], pos: parseInt(m[2], 10) }
+      : { name: component, pos: 0 };
   });
 }
 
@@ -376,7 +374,7 @@ function escapePDFName(str) {
       if (start < i) {
         buffer.push(str.substring(start, i));
       }
-      buffer.push(`#${char.toString(16)}`);
+      buffer.push(`#${char.toString(16).padStart(2, "0")}`);
       start = i + 1;
     }
   }
@@ -386,7 +384,7 @@ function escapePDFName(str) {
   }
 
   if (start < str.length) {
-    buffer.push(str.substring(start, str.length));
+    buffer.push(str.substring(start));
   }
 
   return buffer.join("");
@@ -449,8 +447,16 @@ function _collectJS(entry, xref, list, parents) {
   }
 }
 
+function _collectAction(dict, name, xref, actions) {
+  const list = [];
+  _collectJS(dict, xref, list, new RefSet());
+  if (list.length) {
+    actions.set(name, list);
+  }
+}
+
 function collectActions(xref, dict, eventType) {
-  const actions = Object.create(null);
+  const actions = new Map();
   const additionalActionsDicts = getInheritableProperty({
     dict,
     key: "AA",
@@ -469,29 +475,17 @@ function collectActions(xref, dict, eventType) {
       }
       for (const [key, rawActionDict] of additionalActions.getRawEntries()) {
         const action = eventType[key];
-        if (!action) {
-          continue;
-        }
-        const parents = new RefSet();
-        const list = [];
-        _collectJS(rawActionDict, xref, list, parents);
-        if (list.length > 0) {
-          actions[action] = list;
+        if (action) {
+          _collectAction(rawActionDict, action, xref, actions);
         }
       }
     }
   }
   // Collect the Action if any (we may have one on pushbutton).
   if (dict.has("A")) {
-    const actionDict = dict.get("A");
-    const parents = new RefSet();
-    const list = [];
-    _collectJS(actionDict, xref, list, parents);
-    if (list.length > 0) {
-      actions.Action = list;
-    }
+    _collectAction(dict.get("A"), "Action", xref, actions);
   }
-  return objectSize(actions) > 0 ? actions : null;
+  return actions.size ? actions : null;
 }
 
 const XMLEntities = {
@@ -533,7 +527,7 @@ function encodeToXmlString(str) {
         buffer.push(str.substring(start, i));
       }
       buffer.push(`&#x${char.toString(16).toUpperCase()};`);
-      if (char > 0xd7ff && (char < 0xe000 || char > 0xfffd)) {
+      if (char > 0xffff) {
         // char is represented by two u16
         i++;
       }
@@ -545,7 +539,7 @@ function encodeToXmlString(str) {
     return str;
   }
   if (start < str.length) {
-    buffer.push(str.substring(start, str.length));
+    buffer.push(str.substring(start));
   }
   return buffer.join("");
 }
@@ -561,6 +555,17 @@ function validateFontName(fontFamily, mustWarn = false) {
       }
       return false;
     }
+    // A <string> is terminated by a newline, which for CSS also includes the
+    // form feed character; see https://drafts.csswg.org/css-syntax/#newline.
+    // The font family is escaped before being used, see `serializeFontFamily`,
+    // hence this only prevents values that cannot sensibly name a font from
+    // being used at all (the unquoted case below is already this strict).
+    if (CONTROL_CHAR_REGEXP.test(fontFamily)) {
+      if (mustWarn) {
+        warn(`FontFamily contains control characters: ${fontFamily}.`);
+      }
+      return false;
+    }
   } else {
     // See https://developer.mozilla.org/en-US/docs/Web/CSS/custom-ident.
     for (const ident of fontFamily.split(/[ \t]+/)) {
@@ -573,6 +578,18 @@ function validateFontName(fontFamily, mustWarn = false) {
     }
   }
   return true;
+}
+
+// Strip the spaces preceding a digit, since e.g. "Wingdings 3" is not a valid
+// font name in the css specs.
+// The optional trailing digit is matched as part of the space run, so that a
+// failing match cannot backtrack over the spaces; otherwise the replacement
+// would be quadratic in the number of consecutive spaces.
+function normalizeCSSFontFamily(fontFamily) {
+  return fontFamily.replaceAll(
+    /( +)(\d)?/g,
+    (_, spaces, digit) => digit ?? " "
+  );
 }
 
 function validateCSSFont(cssFontInfo) {
@@ -659,11 +676,7 @@ function numberToString(value) {
     return (roundedValue / 100).toString();
   }
 
-  if (roundedValue % 10 === 0) {
-    return value.toFixed(1);
-  }
-
-  return value.toFixed(2);
+  return roundedValue % 10 === 0 ? value.toFixed(1) : value.toFixed(2);
 }
 
 function getNewAnnotationsMap(annotationStorage) {
@@ -751,6 +764,7 @@ export {
   lookupRect,
   MAX_INT_32,
   MissingDataException,
+  normalizeCSSFontFamily,
   numberToString,
   ParserEOFException,
   parseXFAPath,

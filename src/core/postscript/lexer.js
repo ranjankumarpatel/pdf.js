@@ -132,7 +132,7 @@ class Lexer {
     this.pos = 0;
     this.len = data.length;
     // Sticky regexes: set lastIndex before exec() to match at an exact offset.
-    this._numberPattern = /[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/iy;
+    this._numberPattern = /[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?/iy;
     this._identifierPattern = /[a-z]+/y;
   }
 
@@ -168,10 +168,7 @@ class Lexer {
     this.pos = this._identifierPattern.lastIndex;
     const op = match[0];
     const token = Lexer.#operatorSingletons[op];
-    if (!token) {
-      return new Token(TOKEN.number, 0);
-    }
-    return token;
+    return token ?? new Token(TOKEN.number, 0);
   }
 
   // Return the next token, or Lexer.#singletons.eof at end of input.

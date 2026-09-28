@@ -101,26 +101,72 @@ function waitForPagesEdited(page, type) {
   );
 }
 
-async function waitForHavingContents(page, expected) {
-  await page.evaluate(() => {
-    // Make sure all the pages will be visible.
-    window.PDFViewerApplication.pdfViewer.scrollMode = 2 /* = ScrollMode.WRAPPED = */;
-    window.PDFViewerApplication.pdfViewer.updateScale({
-      drawingDelay: 0,
-      scaleFactor: 0.01,
+function getDraggingStateOnPointerUp(page) {
+  return createPromise(page, resolve => {
+    const view = document.getElementById("thumbnailsView");
+    const isDragging = () => view.classList.contains("isDragging");
+    let dragged = isDragging();
+    const observer = new MutationObserver(() => {
+      dragged ||= isDragging();
     });
+    observer.observe(view, {
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+    window.addEventListener(
+      "pointerup",
+      () => {
+        observer.disconnect();
+        resolve(dragged || isDragging());
+      },
+      { capture: true, once: true }
+    );
   });
-  return page.waitForFunction(
-    ex => {
-      const buffer = [];
-      for (const textLayer of document.querySelectorAll(".textLayer")) {
-        buffer.push(parseInt(textLayer.textContent.trim(), 10));
+}
+
+async function drawInkLine(page, pageNumber) {
+  const rect = await getRect(
+    page,
+    `.page[data-page-number="${pageNumber}"] .annotationEditorLayer`
+  );
+  const x = rect.x + rect.width * 0.3;
+  const y = rect.y + rect.height * 0.3;
+  const clickHandle = await waitForPointerUp(page);
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + 50, y + 50);
+  await page.mouse.up();
+  await awaitPromise(clickHandle);
+}
+
+async function waitForHavingContents(page, expected) {
+  await page.waitForFunction(
+    length => {
+      const { pdfViewer } = window.PDFViewerApplication;
+      for (let i = 0; i < length; i++) {
+        if (!pdfViewer.getPageView(i)?.pdfPage) {
+          return false;
+        }
       }
-      return ex.length === buffer.length && ex.every((v, i) => v === buffer[i]);
+      return true;
     },
     {},
-    expected
+    expected.length
   );
+  const actual = await page.evaluate(async ex => {
+    const { pdfViewer } = window.PDFViewerApplication;
+    const contents = [];
+    for (let i = 0, ii = ex.length; i < ii; i++) {
+      const { items } = await pdfViewer.getPageView(i).pdfPage.getTextContent();
+      const text = items
+        .map(item => item.str ?? "")
+        .join("")
+        .trim();
+      contents.push(typeof ex[i] === "string" ? text : parseInt(text, 10));
+    }
+    return contents;
+  }, expected);
+  expect(actual).toEqual(expected);
 }
 
 async function waitForPageCanvasToHaveImage(page, pageNumber) {
@@ -160,10 +206,7 @@ function getSearchResults(page) {
       if (highlights.length === 0) {
         continue;
       }
-      results.push([
-        i + 1,
-        Array.from(highlights).map(span => span.textContent),
-      ]);
+      results.push([i + 1, Array.from(highlights, span => span.textContent)]);
     }
     return results;
   });
@@ -312,26 +355,33 @@ describe("Reorganize Pages View", () => {
     it("should reorder thumbnails after dropping two adjacent pages", async () => {
       await Promise.all(
         pages.map(async ([browserName, page]) => {
-          pending("Fails consistently (issue #20814).");
-
-          await waitForThumbnailVisible(page, 1);
-          const rect2 = await getRect(page, getThumbnailSelector(2));
-          const rect4 = await getRect(page, getThumbnailSelector(4));
+          await waitForThumbnailVisible(page, [1, 3]);
           await waitAndClick(
             page,
             `.thumbnail:has(${getThumbnailSelector(1)}) input`
           );
+          // Keep the drop point within the browser viewport, which can be
+          // quite short depending on the platform (issue 20814).
+          await page.evaluate(selector => {
+            document
+              .querySelector(selector)
+              .scrollIntoView({ behavior: "instant", block: "end" });
+          }, getThumbnailSelector(3));
+          const rect2 = await getRect(page, getThumbnailSelector(2));
+          const rect3 = await getRect(page, getThumbnailSelector(3));
 
           const handlePagesEdited = await waitForPagesEdited(page);
+          // Drop the pages 1 and 2 on the center of the third thumbnail, i.e.
+          // just after it.
           await dragAndDrop(
             page,
             getThumbnailSelector(2),
-            [[0, rect4.y - rect2.y]],
+            [[0, rect3.y - rect2.y]],
             10
           );
           const pagesMapping = await awaitPromise(handlePagesEdited);
           const expected = [
-            3, 4, 1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+            3, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
           ];
           expect(pagesMapping)
             .withContext(`In ${browserName}`)
@@ -798,19 +848,13 @@ describe("Reorganize Pages View", () => {
           await page.waitForSelector("#viewsManagerStatusActionButton", {
             visible: true,
           });
-          const rect1 = await getRect(page, getThumbnailSelector(1));
-          const rect2 = await getRect(page, getThumbnailSelector(2));
-
-          await dragAndDrop(
-            page,
-            getThumbnailSelector(1),
-            [[0, rect2.y - rect1.y + rect2.height / 2]],
-            10
-          );
+          // Drag-and-drop behavior is covered separately. Use an exact move
+          // here so this test only checks the save payload.
+          await movePages(page, [1], 2);
 
           const handleSave = await createPromise(page, resolve => {
             window.PDFViewerApplication.onSavePages = async ({ data }) => {
-              resolve(Array.from(data[0].pageIndices));
+              resolve(Array.from(data.pageInfos[0].pageIndices));
             };
           });
 
@@ -2015,9 +2059,12 @@ describe("Reorganize Pages View", () => {
           const pagesData = await awaitPromise(handleExport);
           expect(pagesData)
             .withContext(`In ${browserName}`)
-            .toEqual([
-              { document: null, pageIndices: [0, 1], includePages: [0, 2] },
-            ]);
+            .toEqual({
+              pageInfos: [
+                { document: null, pageIndices: [0, 1], includePages: [0, 2] },
+              ],
+              copyLevels: null,
+            });
 
           await waitForTextToBe(page, labelSelector, "Select pages");
           // All checkboxes should be unchecked.
@@ -2052,16 +2099,12 @@ describe("Reorganize Pages View", () => {
         pages.map(async ([browserName, page]) => {
           await waitForThumbnailVisible(page, 1);
 
-          await Promise.all([
-            page.waitForSelector(`#thumbnailsView.isDragging`, {
-              visible: true,
-            }),
-            dragAndDrop(page, getThumbnailSelector(1), [[0, 10]], 10),
-          ]);
+          let handleDraggingState = await getDraggingStateOnPointerUp(page);
+          await dragAndDrop(page, getThumbnailSelector(1), [[0, 10]], 10);
+          expect(await awaitPromise(handleDraggingState))
+            .withContext(`In ${browserName}, dragging should be enabled`)
+            .toBeTrue();
 
-          await page.waitForSelector(`#thumbnailsView.isDragging`, {
-            hidden: true,
-          });
           await waitAndClick(
             page,
             `.thumbnail:has(${getThumbnailSelector(1)}) input`
@@ -2069,28 +2112,13 @@ describe("Reorganize Pages View", () => {
           await waitAndClick(page, "#viewsManagerStatusActionButton");
           await waitAndClick(page, "#viewsManagerStatusActionCopy");
 
-          // If dragging isn't disabled, the promise will resolve with the
-          // selector. Otherwise, it will resolve with undefined (dragAndDrop
-          // has no return), which is the expected behavior.
-          const abortController = new AbortController();
-          const first = await Promise.race([
-            page.waitForSelector(`#thumbnailsView.isDragging`, {
-              visible: true,
-              signal: abortController.signal,
-            }),
-            dragAndDrop(page, getThumbnailSelector(1), [[0, 10]], 10),
-          ]);
-          abortController.abort();
-
-          expect(first)
+          handleDraggingState = await getDraggingStateOnPointerUp(page);
+          await dragAndDrop(page, getThumbnailSelector(1), [[0, 10]], 10);
+          expect(await awaitPromise(handleDraggingState))
             .withContext(
               `In ${browserName}, dragging should be disabled when pasting`
             )
-            .toBeUndefined();
-
-          // Wait a tick to ensure that the controller.abort() has taken effect
-          // before leaving.
-          await waitForBrowserTrip(page);
+            .toBeFalse();
         })
       );
     });
@@ -2455,13 +2483,17 @@ describe("Reorganize Pages View", () => {
           await waitForThumbnailVisible(page, 1);
           const rect1 = await getRect(page, getThumbnailSelector(1));
           const rect2 = await getRect(page, getThumbnailSelector(2));
+          // Stay clear of the bottom edge, where dragging can auto-scroll and
+          // move the page one position too far.
+          const yTranslation =
+            rect2.y + rect2.height / 2 - (rect1.y + rect1.height / 2) + 1;
 
           // Move page 1 after page 2: mapping becomes [2, 1, 3, …, 17].
           let handlePagesEdited = await waitForPagesEdited(page);
           await dragAndDrop(
             page,
             getThumbnailSelector(1),
-            [[0, rect2.y - rect1.y + rect2.height / 2]],
+            [[0, yTranslation]],
             10
           );
           let pageIndices = await awaitPromise(handlePagesEdited);
@@ -2848,23 +2880,12 @@ describe("Reorganize Pages View", () => {
       await closePages(pages);
     });
 
-    it("should check that the pasted page has an ink annotation in the DOM", async () => {
+    it("should keep an ink annotation on a pasted and moved page", async () => {
       await Promise.all(
         pages.map(async ([browserName, page]) => {
           // Enable ink editor mode and draw a line on page 1.
           await switchToEditor("Ink", page);
-          const rect = await getRect(
-            page,
-            ".page[data-page-number='1'] .annotationEditorLayer"
-          );
-          const x = rect.x + rect.width * 0.3;
-          const y = rect.y + rect.height * 0.3;
-          const clickHandle = await waitForPointerUp(page);
-          await page.mouse.move(x, y);
-          await page.mouse.down();
-          await page.mouse.move(x + 50, y + 50);
-          await page.mouse.up();
-          await awaitPromise(clickHandle);
+          await drawInkLine(page, 1);
 
           // Commit the drawing and wait for it to be serialized.
           await page.keyboard.press("Escape");
@@ -2893,20 +2914,118 @@ describe("Reorganize Pages View", () => {
           // Both the original and the cloned annotation must now be in storage.
           await waitForStorageEntries(page, 2);
 
-          // Close the reorganize view and navigate to page 3 (the pasted copy)
-          // to trigger rendering of its annotation editor layer.
+          // When its layer is rendered, a clone replaces its serialized storage
+          // entry with a real editor having a new id. The original id doesn't
+          // change, hence use it to tell the two entries apart.
+          const originalEditorId = await page.evaluate(() => {
+            const entries = Array.from(
+              window.PDFViewerApplication.pdfDocument.annotationStorage
+            );
+            return entries.find(([, editor]) => editor.pageIndex === 0)[0];
+          });
+
+          // Move the pasted copy before the original and verify that both
+          // stored page indices follow the new page order.
+          await movePages(page, [3], 0);
+          const editorPageIndicesHandle = await page.waitForFunction(
+            id => {
+              const storage =
+                window.PDFViewerApplication.pdfDocument.annotationStorage;
+              const original = storage.getRawValue(id);
+              const clone = Array.from(storage).find(
+                ([editorId]) => editorId !== id
+              )?.[1];
+              if (!original || !clone) {
+                return false;
+              }
+              return {
+                original: original.pageIndex,
+                clone: clone.pageIndex,
+              };
+            },
+            {},
+            originalEditorId
+          );
+          const editorPageIndices = await editorPageIndicesHandle.jsonValue();
+          await editorPageIndicesHandle.dispose();
+          expect(editorPageIndices)
+            .withContext(`In ${browserName}`)
+            .toEqual({ original: 1, clone: 0 });
+
+          // Show the moved copy and verify that its cloned editor survived.
           await page.click("#viewsManagerToggleButton");
           await page.waitForSelector("#viewsManager", { hidden: true });
           await page.evaluate(() => {
-            window.PDFViewerApplication.pdfViewer.currentPageNumber = 3;
+            window.PDFViewerApplication.pdfViewer.currentPageNumber = 1;
           });
 
-          // The cloned ink annotation must appear in the DOM of page 3.
-          await page.waitForSelector(`.page[data-page-number="3"] .inkEditor`, {
+          await page.waitForSelector(`.page[data-page-number="1"] .inkEditor`, {
             visible: true,
           });
           const inkEditors = await page.$$(
-            `.page[data-page-number="3"] .inkEditor`
+            `.page[data-page-number="1"] .inkEditor`
+          );
+          expect(inkEditors.length).withContext(`In ${browserName}`).toBe(1);
+        })
+      );
+    });
+  });
+
+  describe("Delete last page while editing", () => {
+    let pages;
+
+    beforeEach(async () => {
+      pages = await loadAndWait(
+        "page_with_number.pdf",
+        ".annotationEditorLayer",
+        "50",
+        null,
+        { enableSplitMerge: true }
+      );
+    });
+
+    afterEach(async () => {
+      await closePages(pages);
+    });
+
+    it("should keep editor layers active on unchanged pages", async () => {
+      await Promise.all(
+        pages.map(async ([browserName, page]) => {
+          await waitForThumbnailVisible(page, 1);
+          await (await page.$(".thumbnail[page-number='17']")).scrollIntoView();
+          await page.waitForSelector(getThumbnailSelector(17), {
+            visible: true,
+          });
+          await waitAndClick(page, getThumbnailSelector(17));
+          await page.waitForSelector(
+            `${getThumbnailSelector(17)}[aria-current="page"]`
+          );
+
+          await waitAndClick(
+            page,
+            `.thumbnail:has(${getThumbnailSelector(17)}) input`
+          );
+          const handlePagesEdited = await waitForPagesEdited(page);
+          await waitAndClick(page, "#viewsManagerStatusActionButton");
+          await waitAndClick(page, "#viewsManagerStatusActionDelete");
+          await awaitPromise(handlePagesEdited);
+
+          await page.click("#viewsManagerToggleButton");
+          await page.waitForSelector("#viewsManager", { hidden: true });
+          await page.evaluate(() => {
+            window.PDFViewerApplication.pdfViewer.currentPageNumber = 1;
+          });
+
+          await switchToEditor("Ink", page);
+          await page.waitForSelector(
+            `.page[data-page-number="1"] .annotationEditorLayer.inkEditing`
+          );
+          await drawInkLine(page, 1);
+
+          await page.keyboard.press("Escape");
+          await waitForSerialized(page, 1);
+          const inkEditors = await page.$$(
+            `.page[data-page-number="1"] .inkEditor`
           );
           expect(inkEditors.length).withContext(`In ${browserName}`).toBe(1);
         })
@@ -3028,12 +3147,12 @@ describe("Reorganize Pages View", () => {
             visible: true,
           });
 
+          const currentThumbnailSelector =
+            '.thumbnailImageContainer[aria-current="page"]';
           const countCurrentThumbnails = () =>
-            page.evaluate(
-              () =>
-                document.querySelectorAll(
-                  '.thumbnailImageContainer[aria-current="page"]'
-                ).length
+            page.$$eval(
+              currentThumbnailSelector,
+              thumbnails => thumbnails.length
             );
 
           // Copy page 1 and paste it after page 3.
@@ -3062,6 +3181,7 @@ describe("Reorganize Pages View", () => {
             await waitAndClick(page, "#viewsManagerStatusActionCut");
             await awaitPromise(handlePagesEdited);
 
+            await page.waitForSelector(currentThumbnailSelector);
             expect(await countCurrentThumbnails())
               .withContext(`In ${browserName}, after cut #${i + 1}`)
               .toBe(1);
@@ -3073,6 +3193,7 @@ describe("Reorganize Pages View", () => {
             await waitAndClick(page, "#viewsManagerStatusUndoButton");
             await awaitPromise(handlePagesEdited);
 
+            await page.waitForSelector(currentThumbnailSelector);
             expect(await countCurrentThumbnails())
               .withContext(`In ${browserName}, after undo #${i + 1}`)
               .toBe(1);
@@ -3326,6 +3447,119 @@ describe("Reorganize Pages View", () => {
             page,
             "#viewsManagerStatusActionLabel",
             `${FSI}6${PDI} selected`
+          );
+        })
+      );
+    });
+
+    it("should merge a password-protected PDF after the current page", async () => {
+      await Promise.all(
+        pages.map(async ([browserName, page]) => {
+          await waitForThumbnailVisible(page, 1);
+
+          // Navigate to page 2 so the merged PDF is inserted after it.
+          await page.evaluate(() => {
+            window.PDFViewerApplication.page = 2;
+          });
+          await page.waitForFunction(
+            () => window.PDFViewerApplication.page === 2
+          );
+          await waitAndClick(page, getThumbnailSelector(2));
+
+          const handleMerged = await createPromise(page, resolve => {
+            window.PDFViewerApplication.eventBus.on(
+              "thumbnailsloaded",
+              resolve,
+              { once: true }
+            );
+          });
+
+          const picker = await page.$("#viewsManagerAddFilePicker");
+          await picker.uploadFile(
+            path.join(__dirname, "../pdfs/issue6010_1.pdf")
+          );
+
+          // Test with an incorrect password first,
+          // to ensure that re-prompting works correctly.
+          for (const password of ["Incorrect password", "abc"]) {
+            await page.waitForSelector("#passwordDialog", { visible: true });
+            await page.type("#password", password);
+            await page.keyboard.press("Enter");
+          }
+
+          await awaitPromise(handleMerged);
+
+          // Original 3 pages + 1 merged page = 4 pages total.
+          await page.waitForFunction(
+            () => parseInt(document.getElementById("pageNumber").max, 10) === 4
+          );
+
+          // Focus must move to the first newly inserted page (page 3, since
+          // we merged after page 2).
+          await page.waitForFunction(
+            () => window.PDFViewerApplication.page === 3
+          );
+
+          // Pages 1–2 come from the original document, then the page of
+          // the merged PDF, then page 3 of the original shifted to the end.
+          await waitForHavingContents(page, [1, 2, "Issue 6010", 3]);
+
+          await waitForTextToBe(
+            page,
+            "#viewsManagerStatusActionLabel",
+            `${FSI}1${PDI} selected`
+          );
+        })
+      );
+    });
+
+    it("should merge a corrupt PDF (with invalid pages /Count) after the current page", async () => {
+      await Promise.all(
+        pages.map(async ([browserName, page]) => {
+          await waitForThumbnailVisible(page, 1);
+
+          // Navigate to page 2 so the merged PDF is inserted after it.
+          await page.evaluate(() => {
+            window.PDFViewerApplication.page = 2;
+          });
+          await page.waitForFunction(
+            () => window.PDFViewerApplication.page === 2
+          );
+          await waitAndClick(page, getThumbnailSelector(2));
+
+          const handleMerged = await createPromise(page, resolve => {
+            window.PDFViewerApplication.eventBus.on(
+              "thumbnailsloaded",
+              resolve,
+              { once: true }
+            );
+          });
+
+          const picker = await page.$("#viewsManagerAddFilePicker");
+          await picker.uploadFile(
+            path.join(__dirname, "../pdfs/poppler-91414-0-53.pdf")
+          );
+          await awaitPromise(handleMerged);
+
+          // Original 3 pages + 1 merged page = 4 pages total.
+          await page.waitForFunction(
+            () => parseInt(document.getElementById("pageNumber").max, 10) === 4
+          );
+
+          // Focus must move to the first newly inserted page (page 3, since
+          // we merged after page 2).
+          await page.waitForFunction(
+            () => window.PDFViewerApplication.page === 3
+          );
+
+          // Pages 1–2 come from the original document, then the page of
+          // the merged PDF, then page 3 of the original shifted to the end.
+          await waitForHavingContents(page, [1, 2, "foobar", 3]);
+
+          await waitForTextToBe(
+            page,
+            "#viewsManagerStatusActionLabel",
+            `${FSI}1${PDI} selected`
           );
         })
       );

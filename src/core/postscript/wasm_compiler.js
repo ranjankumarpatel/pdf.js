@@ -19,6 +19,7 @@ import {
   PS_VALUE_TYPE,
   PSStackToTree,
 } from "./ast.js";
+import { stringToBytes } from "../../shared/util.js";
 import { TOKEN } from "./lexer.js";
 
 // Wasm opcodes — https://webassembly.github.io/spec/core/binary/instructions.html
@@ -98,7 +99,7 @@ function unsignedLEB128(n) {
 }
 
 function encodeASCIIString(s) {
-  return [...unsignedLEB128(s.length), ...Array.from(s, c => c.charCodeAt(0))];
+  return [...unsignedLEB128(s.length), ...stringToBytes(s)];
 }
 
 function section(id, data) {
@@ -281,6 +282,21 @@ class PsWasmCompiler {
       }
       this._code.push(b);
     } while (n !== 0);
+  }
+
+  // `i32.const` immediates are signed LEB128 (Wasm spec), so they must be
+  // emitted with sign extension — the unsigned encoder mis-encodes any value
+  // whose final 7-bit group has bit 0x40 set (e.g. 64 → 0x40 → decoded as −64).
+  _emitSLEB128(n) {
+    for (;;) {
+      const b = n & 0x7f;
+      n >>= 7; // arithmetic shift keeps the sign bit
+      if ((n === 0 && (b & 0x40) === 0) || (n === -1 && (b & 0x40) !== 0)) {
+        this._code.push(b);
+        return;
+      }
+      this._code.push(b | 0x80);
+    }
   }
 
   _emitF64Const(value) {
@@ -476,10 +492,7 @@ class PsWasmCompiler {
     // Returns 0 when divisor == 0 (IEEE 754 gives ±Inf/NaN; pdfium returns 0).
     const tmp = this._allocLocal();
     try {
-      if (!this._compileNode(second)) {
-        return false;
-      }
-      if (!this._compileNode(first)) {
+      if (!this._compileNode(second) || !this._compileNode(first)) {
         return false;
       }
       const code = this._code;
@@ -500,10 +513,7 @@ class PsWasmCompiler {
     // Same select pattern as _compileSafeDivNode with an extra f64_trunc.
     const tmp = this._allocLocal();
     try {
-      if (!this._compileNode(second)) {
-        return false;
-      }
-      if (!this._compileNode(first)) {
+      if (!this._compileNode(second) || !this._compileNode(first)) {
         return false;
       }
       const code = this._code;
@@ -520,10 +530,11 @@ class PsWasmCompiler {
   }
 
   _compileBitshiftNode(first, second) {
-    if (first.type !== PS_NODE.const || !Number.isInteger(first.value)) {
-      return false;
-    }
-    if (!this._compileNode(second)) {
+    if (
+      first.type !== PS_NODE.const ||
+      !Number.isInteger(first.value) ||
+      !this._compileNode(second)
+    ) {
       return false;
     }
 
@@ -532,11 +543,11 @@ class PsWasmCompiler {
     const shift = first.value;
     if (shift > 0) {
       code.push(OP.i32_const);
-      this._emitULEB128(shift);
+      this._emitSLEB128(shift);
       code.push(OP.i32_shl);
     } else if (shift < 0) {
       code.push(OP.i32_const);
-      this._emitULEB128(-shift);
+      this._emitSLEB128(-shift);
       code.push(OP.i32_shr_s);
     }
     code.push(OP.f64_convert_i32_s);
@@ -599,10 +610,7 @@ class PsWasmCompiler {
   _compileAtanNode(first, second) {
     const localR = this._allocLocal();
     try {
-      if (!this._compileNode(second)) {
-        return false;
-      }
-      if (!this._compileNode(first)) {
+      if (!this._compileNode(second) || !this._compileNode(first)) {
         return false;
       }
 
@@ -627,10 +635,10 @@ class PsWasmCompiler {
   }
 
   _compileBitwiseNode(op, first, second) {
-    if (!this._compileBitwiseOperandI32(second)) {
-      return false;
-    }
-    if (!this._compileBitwiseOperandI32(first)) {
+    if (
+      !this._compileBitwiseOperandI32(second) ||
+      !this._compileBitwiseOperandI32(first)
+    ) {
       return false;
     }
     const code = this._code;
@@ -681,13 +689,8 @@ class PsWasmCompiler {
       } finally {
         this._releaseLocal(tmp);
       }
-    } else {
-      if (!this._compileNode(second)) {
-        return false;
-      }
-      if (!this._compileNode(first)) {
-        return false;
-      }
+    } else if (!this._compileNode(second) || !this._compileNode(first)) {
+      return false;
     }
 
     const code = this._code;
@@ -757,11 +760,9 @@ class PsWasmCompiler {
       return this._compileAtanNode(first, second);
     }
 
-    if (op === TOKEN.and || op === TOKEN.or || op === TOKEN.xor) {
-      return this._compileBitwiseNode(op, first, second);
-    }
-
-    return this._compileStandardBinaryNode(op, first, second);
+    return op === TOKEN.and || op === TOKEN.or || op === TOKEN.xor
+      ? this._compileBitwiseNode(op, first, second)
+      : this._compileStandardBinaryNode(op, first, second);
   }
 
   /**
@@ -773,10 +774,7 @@ class PsWasmCompiler {
       // Comparison: leaves i32 directly.
       const wasmOp = PsWasmCompiler.#comparisonToOp.get(node.op);
       if (wasmOp !== undefined) {
-        if (!this._compileNode(node.second)) {
-          return false;
-        }
-        if (!this._compileNode(node.first)) {
+        if (!this._compileNode(node.second) || !this._compileNode(node.first)) {
           return false;
         }
         this._code.push(wasmOp);
@@ -787,10 +785,10 @@ class PsWasmCompiler {
         node.valueType === PS_VALUE_TYPE.boolean &&
         (node.op === TOKEN.and || node.op === TOKEN.or || node.op === TOKEN.xor)
       ) {
-        if (!this._compileNodeAsBoolI32(node.second)) {
-          return false;
-        }
-        if (!this._compileNodeAsBoolI32(node.first)) {
+        if (
+          !this._compileNodeAsBoolI32(node.second) ||
+          !this._compileNodeAsBoolI32(node.first)
+        ) {
           return false;
         }
         switch (node.op) {
@@ -854,7 +852,6 @@ class PsWasmCompiler {
    * Convert the parser AST to a tree, compile each output expression, clamp
    * results to the declared range, store to linear memory, and assemble the
    * Wasm binary.
-   *
    * @param {import("./ast.js").PsProgram} program
    * @returns {Uint8Array|null}  Wasm binary, or null if compilation failed.
    */
@@ -870,7 +867,7 @@ class PsWasmCompiler {
       const min = this._range[i * 2];
       const max = this._range[i * 2 + 1];
       code.push(OP.i32_const);
-      this._emitULEB128(i * 8);
+      this._emitSLEB128(i * 8);
       if (!this._compileNode(outputs[i])) {
         return null;
       }
@@ -947,7 +944,6 @@ class PsWasmCompiler {
  * Parse and compile a PostScript Type 4 function source string into a Wasm
  * binary.  PSStackToTree handles constant folding and algebraic simplifications
  * during the parse-to-tree conversion, so no separate optimizer pass is needed.
- *
  * @param {string} source    – raw PostScript source (decoded PDF stream)
  * @param {number[]} domain  – flat [min0,max0, min1,max1, ...] array
  * @param {number[]} range   – flat [min0,max0, min1,max1, ...] array
@@ -1057,7 +1053,6 @@ function _makeWrapper(exports, nIn, nOut) {
  *
  * Note: synchronous Wasm compilation is only allowed for small modules
  * (< 4 KB in most browsers).  Type 4 functions always qualify.
- *
  * @param {string} source    – raw PostScript source (decoded PDF stream)
  * @param {number[]} domain  – flat [min0,max0, min1,max1, ...] array
  * @param {number[]} range   – flat [min0,max0, min1,max1, ...] array

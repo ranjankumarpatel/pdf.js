@@ -200,20 +200,18 @@ class PsJsCompiler {
 
     // bitshift requires a constant shift amount.
     if (op === TOKEN.bitshift) {
-      if (first.type !== PS_NODE.const || !Number.isInteger(first.value)) {
-        return false;
-      }
-      if (!this._compileNode(second)) {
+      if (
+        first.type !== PS_NODE.const ||
+        !Number.isInteger(first.value) ||
+        !this._compileNode(second)
+      ) {
         return false;
       }
       this.ir.push(OP.SHIFT, first.value);
       return true;
     }
 
-    if (!this._compileNode(second)) {
-      return false;
-    }
-    if (!this._compileNode(first)) {
+    if (!this._compileNode(second) || !this._compileNode(first)) {
       return false;
     }
 
@@ -781,7 +779,7 @@ class PSStackBasedInterpreter {
       const base = this.#sp - nOut;
       for (let i = 0; i < nOut; i++) {
         const v = base + i >= 0 ? this.#stack[base + i] : 0;
-        dest[destOffset + i] = MathClamp(range[i * 2 + 1], range[i * 2], v);
+        dest[destOffset + i] = MathClamp(v, range[i * 2], range[i * 2 + 1]);
       }
     };
   }
@@ -789,7 +787,6 @@ class PSStackBasedInterpreter {
 
 /**
  * Tries PSStackToTree-optimized IR first; falls back to direct interpreter.
- *
  * @param {string}   source
  * @param {number[]} domain  – flat [min0,max0, …]
  * @param {number[]} range   – flat [min0,max0, …]

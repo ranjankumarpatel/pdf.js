@@ -14,6 +14,7 @@
  */
 
 import { INTERNAL_EVT, internalOpt } from "./internal_evt.js";
+import { makeSet } from "pdfjs-lib";
 
 const WaitOnType = {
   EVENT: "event",
@@ -21,8 +22,8 @@ const WaitOnType = {
 };
 
 /**
- * @typedef {Object} WaitOnEventOrTimeoutParameters
- * @property {Object} target - The event target, can for example be:
+ * @typedef {object} WaitOnEventOrTimeoutParameters
+ * @property {object} target - The event target, can for example be:
  *   `window`, `document`, a DOM element, or an {EventBus} instance.
  * @property {string} name - The name of the event.
  * @property {number} delay - The delay, in milliseconds, after which the
@@ -33,8 +34,7 @@ const WaitOnType = {
  * Allows waiting for an event or a timeout, whichever occurs first.
  * Can be used to ensure that an action always occurs, even when an event
  * arrives late or not at all.
- *
- * @param {WaitOnEventOrTimeoutParameters}
+ * @param {WaitOnEventOrTimeoutParameters} params
  * @returns {Promise} A promise that is resolved with a {WaitOnType} value.
  */
 async function waitOnEventOrTimeout({ target, name, delay = 0 }) {
@@ -72,7 +72,7 @@ async function waitOnEventOrTimeout({ target, name, delay = 0 }) {
  * and `off` methods. To raise an event, the `dispatch` method shall be used.
  */
 class EventBus {
-  #listeners = Object.create(null);
+  #listeners = new Map();
 
   constructor() {
     if (typeof PDFJSDev === "undefined" || PDFJSDev.test("GENERIC")) {
@@ -84,8 +84,8 @@ class EventBus {
 
   /**
    * @param {string} eventName
-   * @param {function} listener
-   * @param {Object} [options]
+   * @param {Function} listener
+   * @param {object} [options]
    */
   on(eventName, listener, options = null) {
     let rmAbort = null;
@@ -101,8 +101,7 @@ class EventBus {
       signal.addEventListener("abort", onAbort);
     }
 
-    const eventListeners = (this.#listeners[eventName] ??= []);
-    eventListeners.push({
+    this.#listeners.getOrInsertComputed(eventName, makeSet).add({
       listener,
       internal: options?.internal === INTERNAL_EVT,
       once: options?.once === true,
@@ -112,37 +111,31 @@ class EventBus {
 
   /**
    * @param {string} eventName
-   * @param {function} listener
-   * @param {Object} [options]
+   * @param {Function} listener
+   * @param {object} [options]
    */
   off(eventName, listener, options = null) {
-    const eventListeners = this.#listeners[eventName];
-    if (!eventListeners) {
-      return;
-    }
-    for (let i = 0, ii = eventListeners.length; i < ii; i++) {
-      const evt = eventListeners[i];
-      if (evt.listener === listener) {
-        evt.rmAbort?.(); // Ensure that the `AbortSignal` listener is removed.
-        eventListeners.splice(i, 1);
-        return;
-      }
+    const eventListeners = this.#listeners.get(eventName);
+    const evt = eventListeners?.keys().find(e => e.listener === listener);
+    if (evt) {
+      evt.rmAbort?.(); // Ensure that the `AbortSignal` listener is removed.
+      eventListeners.delete(evt);
     }
   }
 
   /**
    * @param {string} eventName
-   * @param {Object} data
+   * @param {object} data
    */
   dispatch(eventName, data) {
-    const eventListeners = this.#listeners[eventName];
-    if (!eventListeners?.length) {
+    const eventListeners = this.#listeners.get(eventName);
+    if (!eventListeners?.size) {
       return;
     }
     let extListeners;
-    // Making copy of the listeners array in case if it will be modified
+    // Always create a copy of the listeners in case they are modified
     // during dispatch.
-    for (const { listener, internal, once } of eventListeners.slice(0)) {
+    for (const { listener, internal, once } of new Set(eventListeners)) {
       if (once) {
         this.off(eventName, listener);
       }

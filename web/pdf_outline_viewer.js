@@ -19,12 +19,16 @@
 // eslint-disable-next-line max-len
 /** @typedef {import("../src/display/api.js").PDFDocumentProxy} PDFDocumentProxy */
 
+/**
+ * @import { CatalogAttachmentContent } from "../src/core/catalog.js";
+ */
+
 import { BaseTreeViewer } from "./base_tree_viewer.js";
 import { internalOpt } from "./internal_evt.js";
 import { SidebarView } from "./ui_utils.js";
 
 /**
- * @typedef {Object} PDFOutlineViewerOptions
+ * @typedef {object} PDFOutlineViewerOptions
  * @property {HTMLDivElement} container - The viewer element.
  * @property {EventBus} eventBus - The application event bus.
  * @property {PDFLinkService} linkService - The navigation/linking service.
@@ -32,7 +36,7 @@ import { SidebarView } from "./ui_utils.js";
  */
 
 /**
- * @typedef {Object} PDFOutlineViewerRenderParameters
+ * @typedef {object} PDFOutlineViewerRenderParameters
  * @property {Array|null} outline - An array of outline objects.
  * @property {PDFDocumentProxy} pdfDocument - A {PDFDocument} instance.
  */
@@ -127,7 +131,7 @@ class PDFOutlineViewer extends BaseTreeViewer {
    */
   _bindLink(
     element,
-    { url, newWindow, action, attachment, dest, setOCGState }
+    { url, newWindow, action, attachmentId, attachment, dest, setOCGState }
   ) {
     const { linkService } = this;
 
@@ -143,13 +147,23 @@ class PDFOutlineViewer extends BaseTreeViewer {
       };
       return;
     }
-    if (attachment) {
+    if (attachmentId && attachment) {
       element.href = linkService.getAnchorUrl("");
+
+      const openAttachment = async () => {
+        /** @type {CatalogAttachmentContent} */
+        const content = await linkService.getAttachmentContent(attachmentId);
+
+        if (content) {
+          this.downloadManager?.openOrDownloadData(
+            content,
+            attachment.filename
+          );
+        }
+      };
+
       element.onclick = () => {
-        this.downloadManager.openOrDownloadData(
-          attachment.content,
-          attachment.filename
-        );
+        openAttachment();
         return false;
       };
       return;

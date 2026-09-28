@@ -28,6 +28,7 @@ import {
   SystemFontInfo,
 } from "../../src/display/obj_bin_transform_display.js";
 import { FeatureTest } from "../../src/shared/util.js";
+import { InfoUtils } from "../../src/shared/obj_bin_transform_utils.js";
 
 describe("obj_bin_transform", function () {
   describe("Font data", function () {
@@ -80,7 +81,7 @@ describe("obj_bin_transform", function () {
     describe("font data serialization and deserialization", function () {
       describe("CssFontInfo", function () {
         it("must roundtrip correctly for CssFontInfo", function () {
-          const encoder = new TextEncoder();
+          const { encoder } = InfoUtils;
           let sizeEstimate = 0;
           for (const string of ["Sample Family", "not a number", "angle"]) {
             sizeEstimate += 4 + encoder.encode(string).length;
@@ -97,7 +98,7 @@ describe("obj_bin_transform", function () {
 
       describe("SystemFontInfo", function () {
         it("must roundtrip correctly for SystemFontInfo", function () {
-          const encoder = new TextEncoder();
+          const { encoder } = InfoUtils;
           let sizeEstimate = 1 + 4;
           for (const string of [
             "some string",
@@ -112,7 +113,7 @@ describe("obj_bin_transform", function () {
           const buffer = compileSystemFontInfo(systemFontInfo);
           expect(buffer.byteLength).toEqual(sizeEstimate);
           const deserialized = new SystemFontInfo(buffer);
-          expect(deserialized.guessFallback).toEqual(false);
+          expect(deserialized.guessFallback).toBeFalse();
           expect(deserialized.css).toEqual("some string");
           expect(deserialized.loadedName).toEqual("another string");
           expect(deserialized.baseFontName).toEqual("base name");
@@ -127,23 +128,23 @@ describe("obj_bin_transform", function () {
       describe("FontInfo", function () {
         it("must roundtrip correctly for FontInfo", function () {
           let sizeEstimate = 92; // fixed offset until the strings
-          const encoder = new TextEncoder();
+          const { encoder } = InfoUtils;
           sizeEstimate += 4 + 4 * (4 + encoder.encode("string").length);
           sizeEstimate += 4 + 4; // cssFontInfo and systemFontInfo
           sizeEstimate += 4 + fontInfo.data.length;
           const buffer = compileFontInfo(fontInfo);
           expect(buffer.byteLength).toEqual(sizeEstimate);
           const deserialized = new FontInfo({ buffer });
-          expect(deserialized.black).toEqual(true);
-          expect(deserialized.bold).toEqual(true);
-          expect(deserialized.disableFontFace).toEqual(true);
-          expect(deserialized.fontExtraProperties).toEqual(true);
-          expect(deserialized.isInvalidPDFjsFont).toEqual(true);
-          expect(deserialized.isType3Font).toEqual(true);
-          expect(deserialized.italic).toEqual(true);
-          expect(deserialized.missingFile).toEqual(true);
-          expect(deserialized.remeasure).toEqual(true);
-          expect(deserialized.vertical).toEqual(true);
+          expect(deserialized.black).toBeTrue();
+          expect(deserialized.bold).toBeTrue();
+          expect(deserialized.disableFontFace).toBeTrue();
+          expect(deserialized.fontExtraProperties).toBeTrue();
+          expect(deserialized.isInvalidPDFjsFont).toBeTrue();
+          expect(deserialized.isType3Font).toBeTrue();
+          expect(deserialized.italic).toBeTrue();
+          expect(deserialized.missingFile).toBeTrue();
+          expect(deserialized.remeasure).toBeTrue();
+          expect(deserialized.vertical).toBeTrue();
           expect(deserialized.ascent).toEqual(1);
           expect(deserialized.defaultWidth).toEqual(1);
           expect(deserialized.descent).toEqual(1);

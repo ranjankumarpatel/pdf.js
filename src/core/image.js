@@ -36,7 +36,6 @@ import { Name } from "./primitives.js";
 
 /**
  * Configuration for {@linkcode PDFImage.fillGrayBuffer}.
- *
  * @typedef FillGrayBufferOptions
  * @property {number} [destWidth]
  *   Destination width; defaults to the source image width (no resampling).
@@ -54,7 +53,6 @@ import { Name } from "./primitives.js";
 
 /**
  * Configuration for {@linkcode FillMaskAlphaCallback} functions.
- *
  * @typedef FillMaskAlphaOptions
  * @property {number} maxRows
  *   Maximum number of image rows to write; defaults to the full image height.
@@ -66,13 +64,12 @@ import { Name } from "./primitives.js";
 
 /**
  * Fills the alpha values for the mask.
- *
  * @callback FillMaskAlphaCallback
  * @param {Uint8ClampedArray} buffer
  *   Buffer to write the alpha values to.
  * @param {FillMaskAlphaOptions} options
  *   Configuration for filling the alpha values.
- * @return {Promise<undefined> | undefined | void}
+ * @returns {Promise<undefined> | undefined | void}
  *   Optional promise that resolves when the alpha values have been filled.
  */
 
@@ -119,7 +116,7 @@ class PDFImage {
         this.jpxDecoderOptions = {
           numComponents: 0,
           isIndexedColormap: false,
-          smaskInData: dict.has("SMaskInData"),
+          smaskInData: dict.get("SMaskInData") >= 1,
           reducePower,
         };
         if (reducePower) {
@@ -196,6 +193,25 @@ class PDFImage {
     if (!this.imageMask) {
       let colorSpace = dict.getRaw("CS") || dict.getRaw("ColorSpace");
       const hasColorSpace = !!colorSpace;
+
+      if (
+        this.jpxDecoderOptions?.smaskInData &&
+        dict.get("SMaskInData") === 2
+      ) {
+        this.jpxPremultiplied = true;
+        if (this.matte) {
+          const matteColorSpace = ColorSpaceUtils.parse({
+            cs: hasColorSpace ? colorSpace : Name.get("DeviceRGB"),
+            xref,
+            resources: isInline ? res : null,
+            pdfFunctionFactory,
+            globalColorSpaceCache,
+            localColorSpaceCache,
+          });
+          this.preblendMatte = matteColorSpace.getRgb(this.matte, 0);
+        }
+      }
+
       if (!hasColorSpace) {
         if (this.jpxDecoderOptions) {
           colorSpace = Name.get("DeviceRGBA");
@@ -529,7 +545,6 @@ class PDFImage {
 
     const max = (1 << bpc) - 1;
     let i = 0,
-      ii,
       buf;
 
     if (bpc === 1) {
@@ -567,7 +582,7 @@ class PDFImage {
       // The general case that handles all other bpc values.
       let bits = 0;
       buf = 0;
-      for (i = 0, ii = length; i < ii; ++i) {
+      for (i = 0; i < length; ++i) {
         if (i % rowComps === 0) {
           buf = 0;
           bits = 0;
@@ -579,13 +594,7 @@ class PDFImage {
         }
 
         const remainingBits = bits - bpc;
-        let value = buf >> remainingBits;
-        if (value < 0) {
-          value = 0;
-        } else if (value > max) {
-          value = max;
-        }
-        output[i] = value;
+        output[i] = MathClamp(buf >> remainingBits, 0, max);
         buf &= (1 << remainingBits) - 1;
         bits = remainingBits;
       }
@@ -660,22 +669,7 @@ class PDFImage {
     });
   }
 
-  undoPreblend(buffer, width, height) {
-    if (typeof PDFJSDev === "undefined" || PDFJSDev.test("TESTING")) {
-      assert(
-        buffer instanceof Uint8ClampedArray,
-        'PDFImage.undoPreblend: Unsupported "buffer" type.'
-      );
-    }
-    const matte = this.smask?.matte;
-    if (!matte) {
-      return;
-    }
-    const matteRgb = this.colorSpace.getRgb(matte, 0);
-    const matteR = matteRgb[0];
-    const matteG = matteRgb[1];
-    const matteB = matteRgb[2];
-    const length = width * height * 4;
+  static #undoPreblend(buffer, length, matteR, matteG, matteB) {
     for (let i = 0; i < length; i += 4) {
       const alpha = buffer[i + 3];
       if (alpha === 0) {
@@ -691,6 +685,27 @@ class PDFImage {
       buffer[i + 1] = (buffer[i + 1] - matteG) * k + matteG;
       buffer[i + 2] = (buffer[i + 2] - matteB) * k + matteB;
     }
+  }
+
+  undoPreblend(buffer, width, height) {
+    if (typeof PDFJSDev === "undefined" || PDFJSDev.test("TESTING")) {
+      assert(
+        buffer instanceof Uint8ClampedArray,
+        'PDFImage.undoPreblend: Unsupported "buffer" type.'
+      );
+    }
+    const matte = this.smask?.matte;
+    if (!matte) {
+      return;
+    }
+    const matteRgb = this.colorSpace.getRgb(matte, 0);
+    PDFImage.#undoPreblend(
+      buffer,
+      width * height * 4,
+      matteRgb[0],
+      matteRgb[1],
+      matteRgb[2]
+    );
   }
 
   async createImageData(forceRGBA = false, isOffscreenCanvasSupported = false) {
@@ -723,6 +738,17 @@ class PDFImage {
         { internal: isOffscreenCanvasSupported && mustBeResized }
       ));
 
+      if (this.jpxPremultiplied) {
+        const matteRgb = this.preblendMatte;
+        PDFImage.#undoPreblend(
+          imgArray,
+          imgArray.length,
+          matteRgb?.[0] ?? 0,
+          matteRgb?.[1] ?? 0,
+          matteRgb?.[2] ?? 0
+        );
+      }
+
       if (isOffscreenCanvasSupported) {
         if (!mustBeResized) {
           return this.createBitmap(
@@ -738,7 +764,7 @@ class PDFImage {
       return imgData;
     }
 
-    if (!forceRGBA) {
+    if (!forceRGBA && !this.smask && !this.mask) {
       // If it is a 1-bit-per-pixel grayscale (i.e. black-and-white) image
       // without any complications, we pass a same-sized copy to the main
       // thread rather than expanding by 32x to RGBA form. This saves *lots*
@@ -758,8 +784,6 @@ class PDFImage {
       }
       if (
         kind &&
-        !this.smask &&
-        !this.mask &&
         drawWidth === originalWidth &&
         drawHeight === originalHeight
       ) {
@@ -801,35 +825,34 @@ class PDFImage {
         }
         return imgData;
       }
-      if (
-        this.image instanceof JpegStream &&
-        !this.smask &&
-        !this.mask &&
-        !this.needsDecode
-      ) {
-        let imageLength = originalHeight * rowBytes;
-        if (isOffscreenCanvasSupported && !mustBeResized) {
-          let isHandled = false;
-          switch (this.colorSpace.name) {
-            case "DeviceGray":
-              // Avoid truncating the image, since `JpegImage.getData`
-              // will expand the image data when `forceRGB === true`.
-              imageLength *= 4;
-              isHandled = true;
-              break;
-            case "DeviceRGB":
-              imageLength = (imageLength / 3) * 4;
-              isHandled = true;
-              break;
-            case "DeviceCMYK":
-              isHandled = true;
-              break;
-          }
-
-          if (isHandled) {
+      if (this.image instanceof JpegStream && !this.needsDecode) {
+        let isHandled = false;
+        switch (this.colorSpace.name) {
+          case "DeviceGray":
+          case "DeviceRGB":
+          case "DeviceCMYK":
+            isHandled = true;
+            break;
+        }
+        if (isHandled) {
+          if (isOffscreenCanvasSupported) {
+            // Try ImageDecoder before the pixel-buffer fallback.
             const image = await this.#getImage(drawWidth, drawHeight);
             if (image) {
               return image;
+            }
+          }
+          let imageLength = originalHeight * rowBytes;
+
+          if (isOffscreenCanvasSupported && !mustBeResized) {
+            switch (this.colorSpace.name) {
+              case "DeviceGray":
+                // Account for the DeviceGray-to-RGBA expansion.
+                imageLength *= 4;
+                break;
+              case "DeviceRGB":
+                imageLength = (imageLength / 3) * 4;
+                break;
             }
             const rgba = await this.getImageBytes(imageLength, {
               drawWidth,
@@ -844,26 +867,17 @@ class PDFImage {
               rgba
             );
           }
-        } else {
-          switch (this.colorSpace.name) {
-            case "DeviceGray":
-              imageLength *= 3;
-            /* falls through */
-            case "DeviceRGB":
-            case "DeviceCMYK":
-              imgData.kind = ImageKind.RGB_24BPP;
-              imgData.data = await this.getImageBytes(imageLength, {
-                drawWidth,
-                drawHeight,
-                forceRGB: true,
-                internal: mustBeResized,
-              });
-              if (mustBeResized) {
-                // The image is too big so we resize it.
-                return ImageResizer.createImage(imgData);
-              }
-              return imgData;
+          if (this.colorSpace.name === "DeviceGray") {
+            imageLength *= 3;
           }
+          imgData.kind = ImageKind.RGB_24BPP;
+          imgData.data = await this.getImageBytes(imageLength, {
+            drawWidth,
+            drawHeight,
+            forceRGB: true,
+            internal: mustBeResized,
+          });
+          return mustBeResized ? ImageResizer.createImage(imgData) : imgData;
         }
       }
     }
@@ -946,10 +960,7 @@ class PDFImage {
     }
 
     imgData.data = data;
-    if (mustBeResized) {
-      return ImageResizer.createImage(imgData);
-    }
-    return imgData;
+    return mustBeResized ? ImageResizer.createImage(imgData) : imgData;
   }
 
   /**
@@ -959,7 +970,6 @@ class PDFImage {
    * omitted), pixels are sampled linearly with no extra allocation.
    * When they differ, nearest-neighbour resampling is used, sampling decoded
    * pixels directly from the `comps` array with no intermediate buffer.
-   *
    * @param {Uint8ClampedArray} buffer
    *   Buffer to fill with grayscale values.
    * @param {FillGrayBufferOptions} [options]
@@ -1118,14 +1128,15 @@ class PDFImage {
   }
 
   async #getImage(width, height) {
-    const bitmap = await this.image.getTransferableImage();
+    const bitmap = await this.image.getTransferableImage(width, height);
     if (!bitmap) {
       return null;
     }
+    // ImageDecoder may ignore the requested dimensions.
     return {
       data: null,
-      width,
-      height,
+      width: bitmap.displayWidth ?? width,
+      height: bitmap.displayHeight ?? height,
       bitmap,
       interpolate: this.interpolate,
     };

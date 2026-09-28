@@ -167,11 +167,22 @@ const AnnotationType = {
   WATERMARK: 24,
   THREED: 25,
   REDACT: 26,
+  RICHMEDIA: 27,
 };
 
 const AnnotationReplyType = {
   GROUP: "Group",
   REPLY: "R",
+};
+
+// Rendition action operations from Table 214, Section 12.6.4.13 of the PDF
+// specification (ISO 32000-1).
+const AnnotationRenditionOperation = {
+  PLAY_OR_RESUME: 0,
+  STOP: 1,
+  PAUSE: 2,
+  RESUME: 3,
+  PLAY: 4,
 };
 
 const AnnotationFlag = {
@@ -400,6 +411,10 @@ function warn(msg) {
   }
 }
 
+/**
+ * @param {string} msg
+ * @returns {never}
+ */
 function unreachable(msg) {
   throw new Error(msg);
 }
@@ -426,11 +441,10 @@ function _isValidProtocol(url) {
 
 /**
  * Attempts to create a valid absolute URL.
- *
  * @param {URL|string} url - An absolute, or relative, URL.
  * @param {URL|string} [baseUrl] - An absolute URL.
- * @param {Object} [options]
- * @returns Either a valid {URL}, or `null` otherwise.
+ * @param {object} [options]
+ * @returns {URL | null} Either a valid {@link URL}, or `null` otherwise.
  */
 function createValidAbsoluteUrl(url, baseUrl = null, options = null) {
   if (!url) {
@@ -462,7 +476,6 @@ function createValidAbsoluteUrl(url, baseUrl = null, options = null) {
 
 /**
  * Remove, or replace, the hash property of the URL.
- *
  * @param {URL|string} url - The absolute, or relative, URL.
  * @param {string} hash - The hash property (use an empty string to remove it).
  * @param {boolean} [allowRel] - Allow relative URLs.
@@ -600,10 +613,6 @@ function stringToBytes(str) {
   return bytes;
 }
 
-function objectSize(obj) {
-  return Object.keys(obj).length;
-}
-
 class FeatureTest {
   static get isLittleEndian() {
     const buffer8 = new Uint8Array(4);
@@ -696,6 +705,14 @@ class FeatureTest {
       input.value !== "#ff0000"
     );
   }
+
+  static get isBackdropFilterSupported() {
+    return shadow(
+      this,
+      "isBackdropFilterSupported",
+      typeof CSS !== "undefined" && CSS.supports("backdrop-filter", "blur(1px)")
+    );
+  }
 }
 
 class Util {
@@ -703,7 +720,7 @@ class Util {
     return shadow(
       this,
       "hexNums",
-      Array.from(Array(256).keys(), n => n.toString(16).padStart(2, "0"))
+      Array.from({ length: 256 }, (_, n) => n.toString(16).padStart(2, "0"))
     );
   }
 
@@ -883,11 +900,7 @@ class Util {
       Math.max(rect1[1], rect1[3]),
       Math.max(rect2[1], rect2[3])
     );
-    if (yLow > yHigh) {
-      return null;
-    }
-
-    return [xLow, yLow, xHigh, yHigh];
+    return yLow > yHigh ? null : [xLow, yLow, xHigh, yHigh];
   }
 
   static pointBoundingBox(x, y, minMax) {
@@ -1112,6 +1125,7 @@ function _isValidExplicitDest(validRef, validName, dest) {
 const makeArr = () => [];
 const makeMap = () => new Map();
 const makeObj = () => Object.create(null);
+const makeSet = () => new Set();
 
 // See https://developer.mozilla.org/en-US/docs/Web/API/Blob/bytes#browser_compatibility
 if (
@@ -1135,6 +1149,14 @@ if (
   };
 }
 
+// TODO: Remove this once `Iterator.prototype.join` is generally available.
+if (typeof Iterator.prototype.join !== "function") {
+  // eslint-disable-next-line no-extend-native
+  Iterator.prototype.join = function (separator) {
+    return [...this].join(separator);
+  };
+}
+
 export {
   _isValidExplicitDest,
   AbortException,
@@ -1147,6 +1169,7 @@ export {
   AnnotationFlag,
   AnnotationMode,
   AnnotationPrefix,
+  AnnotationRenditionOperation,
   AnnotationReplyType,
   AnnotationType,
   assert,
@@ -1173,9 +1196,9 @@ export {
   makeArr,
   makeMap,
   makeObj,
+  makeSet,
   MeshFigureType,
   normalizeUnicode,
-  objectSize,
   OPS,
   PageActionEventType,
   PasswordException,

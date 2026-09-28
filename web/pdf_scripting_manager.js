@@ -21,14 +21,14 @@ import { RenderingStates } from "./renderable_view.js";
 import { shadow } from "pdfjs-lib";
 
 /**
- * @typedef {Object} PDFScriptingManagerOptions
+ * @typedef {object} PDFScriptingManagerOptions
  * @property {EventBus} eventBus - The application event bus.
  * @property {string} [sandboxBundleSrc] - The path and filename of the
  *   scripting bundle.
- * @property {Object} [externalServices] - The factory that is used when
+ * @property {object} [externalServices] - The factory that is used when
  *   initializing scripting; must contain a `createScripting` method.
  *   PLEASE NOTE: Primarily intended for the default viewer use-case.
- * @property {function} [docProperties] - The function that is used to lookup
+ * @property {Function} [docProperties] - The function that is used to lookup
  *   the necessary document properties.
  */
 
@@ -44,6 +44,8 @@ class PDFScriptingManager {
   #eventBus = null;
 
   #externalServices = null;
+
+  #objectIds = null;
 
   #pdfDocument = null;
 
@@ -104,6 +106,18 @@ class PDFScriptingManager {
     if (pdfDocument !== this.#pdfDocument) {
       return; // The document was closed while the data resolved.
     }
+
+    // Collect the ids of every field annotation, so that any sandbox message
+    // targeting an unknown id can be ignored.
+    if (objects) {
+      this.#objectIds = new Set();
+      for (const fields of objects.values()) {
+        for (const { id } of fields) {
+          this.#objectIds.add(id);
+        }
+      }
+    }
+
     try {
       this.#scripting = this.#initScripting();
     } catch (error) {
@@ -368,6 +382,9 @@ class PDFScriptingManager {
 
     const ids = siblings ? [id, ...siblings] : [id];
     for (const elementId of ids) {
+      if (!this.#objectIds?.has(elementId)) {
+        continue;
+      }
       const element = document.querySelector(
         `[data-element-id="${elementId}"]`
       );
@@ -456,6 +473,8 @@ class PDFScriptingManager {
   }
 
   async #destroyScripting() {
+    this.#objectIds = null;
+
     if (!this.#scripting) {
       this.#pdfDocument = null;
 

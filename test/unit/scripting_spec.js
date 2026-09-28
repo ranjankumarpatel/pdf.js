@@ -59,15 +59,12 @@ describe("Scripting", function () {
       createSandbox(data) {
         promise.then(sbx => sbx.create(data));
       },
-      dispatchEventInSandbox(data) {
-        return promise.then(sbx => sbx.dispatchEvent(data));
-      },
+      dispatchEventInSandbox: data =>
+        promise.then(sbx => sbx.dispatchEvent(data)),
       nukeSandbox() {
         promise.then(sbx => sbx.nukeSandbox());
       },
-      eval(code, key) {
-        return promise.then(sbx => sbx.evalForTesting(code, key));
-      },
+      eval: (code, key) => promise.then(sbx => sbx.evalForTesting(code, key)),
     };
   });
 
@@ -117,7 +114,7 @@ describe("Scripting", function () {
         name: "Keystroke",
         willCommit: true,
       });
-      expect(send_queue.has(refId)).toEqual(true);
+      expect(send_queue.has(refId)).toBeTrue();
       expect(send_queue.get(refId)).toEqual({
         id: refId,
         siblings: null,
@@ -229,6 +226,15 @@ describe("Scripting", function () {
         value = await myeval(`util.printd("dddd ddd dd d", ${date})`);
         expect(value).toEqual("Sunday Sun 15 15");
       });
+
+      it("should preserve escaped characters in date formats", async () => {
+        const date = `new Date("Sun Apr 15 2007 03:14:15")`;
+        const format = String.raw`\m mm \d dd \\ \é`;
+        const value = await myeval(
+          `util.printd(${JSON.stringify(format)}, ${date})`
+        );
+        expect(value).toEqual("m 04 d 15 \\ é");
+      });
     });
 
     describe("scand", function () {
@@ -250,6 +256,15 @@ describe("Scripting", function () {
 
         value = await myeval(`util.scand("mmddyyyy", "07a15b2007").toString()`);
         expect(new Date(value)).toEqual(new Date("07/15/2007 12:00:00"));
+      });
+
+      it("should handle a format with repeated specifiers", async () => {
+        const cFormat = "Hm".repeat(40);
+        const cDate = `${"1".repeat(84)}x`;
+        const value = await myeval(
+          `util.scand("${cFormat}", "${cDate}")?.toString() ?? "null"`
+        );
+        expect(value).toEqual("null");
       });
     });
 
@@ -347,10 +362,84 @@ describe("Scripting", function () {
         willCommit: true,
       });
 
-      expect(send_queue.has(refId)).toEqual(true);
+      expect(send_queue.has(refId)).toBeTrue();
       expect(send_queue.get(refId)).toEqual({
         id: refId,
         value: "123",
+      });
+    });
+
+    it("should trigger an event added with setAction", async () => {
+      const refId = getId();
+      const data = {
+        objects: {
+          field: [
+            {
+              id: refId,
+              value: "",
+              actions: {},
+              type: "text",
+            },
+          ],
+        },
+        appInfo: { language: "en-US", platform: "Linux x86_64" },
+        calculationOrder: [],
+      };
+      sandbox.createSandbox(data);
+
+      await myeval(
+        `(this.getField("field").setAction("test", 'event.source.value = "abc";'), 0)`
+      );
+
+      await sandbox.dispatchEventInSandbox({
+        id: refId,
+        value: "",
+        name: "test",
+        willCommit: true,
+      });
+
+      expect(send_queue.has(refId)).toBeTrue();
+      expect(send_queue.get(refId)).toEqual({
+        id: refId,
+        value: "abc",
+      });
+    });
+
+    it("should trigger an event appended with setAction", async () => {
+      const refId = getId();
+      const data = {
+        objects: {
+          field: [
+            {
+              id: refId,
+              value: "",
+              actions: {
+                test: [`event.source.value = "a";`],
+              },
+              type: "text",
+            },
+          ],
+        },
+        appInfo: { language: "en-US", platform: "Linux x86_64" },
+        calculationOrder: [],
+      };
+      sandbox.createSandbox(data);
+
+      await myeval(
+        `(this.getField("field").setAction("test", 'event.source.value += "b";'), 0)`
+      );
+
+      await sandbox.dispatchEventInSandbox({
+        id: refId,
+        value: "",
+        name: "test",
+        willCommit: true,
+      });
+
+      expect(send_queue.has(refId)).toBeTrue();
+      expect(send_queue.get(refId)).toEqual({
+        id: refId,
+        value: "ab",
       });
     });
 
@@ -383,7 +472,7 @@ describe("Scripting", function () {
         selEnd: 4,
       });
 
-      expect(send_queue.has(refId)).toEqual(true);
+      expect(send_queue.has(refId)).toBeTrue();
       expect(send_queue.get(refId)).toEqual({
         id: refId,
         siblings: null,
@@ -421,7 +510,7 @@ describe("Scripting", function () {
         selEnd: 4,
       });
 
-      expect(send_queue.has(refId)).toEqual(true);
+      expect(send_queue.has(refId)).toBeTrue();
       expect(send_queue.get(refId)).toEqual({
         id: refId,
         siblings: null,
@@ -455,7 +544,7 @@ describe("Scripting", function () {
         name: "test",
         willCommit: true,
       });
-      expect(send_queue.has(refId)).toEqual(false);
+      expect(send_queue.has(refId)).toBeFalse();
     });
 
     it("should trigger a valid commit Keystroke event", async () => {
@@ -495,7 +584,7 @@ describe("Scripting", function () {
         willCommit: true,
       });
 
-      expect(send_queue.has(refId1)).toEqual(true);
+      expect(send_queue.has(refId1)).toBeTrue();
       expect(send_queue.get(refId1)).toEqual({
         id: refId1,
         siblings: null,
@@ -637,7 +726,7 @@ describe("Scripting", function () {
         name: "Keystroke",
         willCommit: true,
       });
-      expect(send_queue.has("alert")).toEqual(true);
+      expect(send_queue.has("alert")).toBeTrue();
       expect(send_queue.get("alert")).toEqual({
         command: "alert",
         value: "hello",
@@ -651,7 +740,7 @@ describe("Scripting", function () {
         name: "Keystroke",
         willCommit: true,
       });
-      expect(send_queue.has("alert")).toEqual(false);
+      expect(send_queue.has("alert")).toBeFalse();
       send_queue.delete(refId);
     });
   });
@@ -670,10 +759,10 @@ describe("Scripting", function () {
       it("should parse a date with a format", async () => {
         const check = async (date, format, expected) => {
           const value = await myeval(
-            `AFParseDateEx("${date}", "${format}").toISOString().replace(/T.*$/, "")`
+            `AFParseDateEx("${date}", "${format}").toISOString().replace(/T.*/, "")`
           );
           expect(value).toEqual(
-            new Date(expected).toISOString().replace(/T.*$/, "")
+            new Date(expected).toISOString().replace(/T.*/, "")
           );
         };
 
@@ -728,7 +817,7 @@ describe("Scripting", function () {
         expect(value).toEqual(-123.456);
 
         value = await myeval(`AFMakeNumber("not a number")`);
-        expect(value).toEqual(null);
+        expect(value).toBeNull();
       });
     });
 
@@ -792,7 +881,7 @@ describe("Scripting", function () {
           value: "0",
           name: "test1",
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           value: "0.00€",
@@ -804,7 +893,7 @@ describe("Scripting", function () {
           value: "",
           name: "test6",
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           value: "0.00€",
@@ -816,7 +905,7 @@ describe("Scripting", function () {
           value: "123456.789",
           name: "test1",
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           value: "123,456.79€",
@@ -828,7 +917,7 @@ describe("Scripting", function () {
           value: "223456.789",
           name: "test2",
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           value: "$223456,8",
@@ -840,7 +929,7 @@ describe("Scripting", function () {
           value: "-323456.789",
           name: "test3",
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           value: "323,456.79€",
@@ -853,7 +942,7 @@ describe("Scripting", function () {
           value: "-423456.789",
           name: "test4",
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           value: "(423,456.79€)",
@@ -865,7 +954,7 @@ describe("Scripting", function () {
           value: "-52345.678",
           name: "test5",
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           value: "(52,345.68€)",
@@ -905,7 +994,7 @@ describe("Scripting", function () {
           name: "Keystroke",
           willCommit: true,
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           siblings: null,
@@ -944,7 +1033,7 @@ describe("Scripting", function () {
           name: "Keystroke",
           willCommit: true,
         });
-        expect(send_queue.has("alert")).toEqual(true);
+        expect(send_queue.has("alert")).toBeTrue();
         expect(send_queue.get("alert")).toEqual({
           command: "alert",
           value:
@@ -987,7 +1076,7 @@ describe("Scripting", function () {
           value: "0.456789",
           name: "test1",
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           value: "45.68%",
@@ -999,7 +1088,7 @@ describe("Scripting", function () {
           value: "0.456789",
           name: "test2",
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           value: "%45.68",
@@ -1037,7 +1126,7 @@ describe("Scripting", function () {
           value: "Sun Apr 15 2007 03:14:15",
           name: "test1",
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           value: "4/15",
@@ -1049,7 +1138,7 @@ describe("Scripting", function () {
           value: "Sun Apr 15 2007 03:14:15",
           name: "test2",
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           value: "4/15/07 3:14 am",
@@ -1084,7 +1173,7 @@ describe("Scripting", function () {
           name: "Keystroke",
           willCommit: true,
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           siblings: null,
@@ -1099,7 +1188,7 @@ describe("Scripting", function () {
           name: "Keystroke",
           willCommit: true,
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           siblings: null,
@@ -1115,7 +1204,7 @@ describe("Scripting", function () {
           name: "Keystroke",
           willCommit: true,
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           siblings: null,
@@ -1131,7 +1220,7 @@ describe("Scripting", function () {
           name: "Keystroke",
           willCommit: true,
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           siblings: null,
@@ -1170,7 +1259,7 @@ describe("Scripting", function () {
           name: "Keystroke",
           willCommit: true,
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           siblings: null,
@@ -1206,7 +1295,7 @@ describe("Scripting", function () {
           name: "Keystroke",
           willCommit: true,
         });
-        expect(send_queue.has("alert")).toEqual(true);
+        expect(send_queue.has("alert")).toBeTrue();
         expect(send_queue.get("alert")).toEqual({
           command: "alert",
           value:
@@ -1281,7 +1370,7 @@ describe("Scripting", function () {
           name: "Keystroke",
           willCommit: true,
         });
-        expect(send_queue.has(refIds[3])).toEqual(true);
+        expect(send_queue.has(refIds[3])).toBeTrue();
         expect(send_queue.get(refIds[3])).toEqual({
           id: refIds[3],
           siblings: null,
@@ -1295,7 +1384,7 @@ describe("Scripting", function () {
           name: "Keystroke",
           willCommit: true,
         });
-        expect(send_queue.has(refIds[3])).toEqual(true);
+        expect(send_queue.has(refIds[3])).toBeTrue();
         expect(send_queue.get(refIds[3])).toEqual({
           id: refIds[3],
           siblings: null,
@@ -1309,7 +1398,7 @@ describe("Scripting", function () {
           name: "Keystroke",
           willCommit: true,
         });
-        expect(send_queue.has(refIds[3])).toEqual(true);
+        expect(send_queue.has(refIds[3])).toBeTrue();
         expect(send_queue.get(refIds[3])).toEqual({
           id: refIds[3],
           siblings: null,
@@ -1317,7 +1406,7 @@ describe("Scripting", function () {
           formattedValue: null,
         });
 
-        expect(send_queue.has(refIds[4])).toEqual(true);
+        expect(send_queue.has(refIds[4])).toBeTrue();
         expect(send_queue.get(refIds[4])).toEqual({
           id: refIds[4],
           siblings: null,
@@ -1387,7 +1476,7 @@ describe("Scripting", function () {
           name: "Keystroke",
           willCommit: true,
         });
-        expect(send_queue.has(refIds[5])).toEqual(true);
+        expect(send_queue.has(refIds[5])).toBeTrue();
         expect(send_queue.get(refIds[5])).toEqual({
           id: refIds[5],
           siblings: null,
@@ -1401,7 +1490,7 @@ describe("Scripting", function () {
           name: "Keystroke",
           willCommit: true,
         });
-        expect(send_queue.has(refIds[5])).toEqual(true);
+        expect(send_queue.has(refIds[5])).toBeTrue();
         expect(send_queue.get(refIds[5])).toEqual({
           id: refIds[5],
           siblings: null,
@@ -1475,7 +1564,7 @@ describe("Scripting", function () {
           name: "Keystroke",
           willCommit: true,
         });
-        expect(send_queue.has(refIds[3])).toEqual(true);
+        expect(send_queue.has(refIds[3])).toBeTrue();
         expect(send_queue.get(refIds[3])).toEqual({
           id: refIds[3],
           siblings: null,
@@ -1489,7 +1578,7 @@ describe("Scripting", function () {
           name: "Keystroke",
           willCommit: true,
         });
-        expect(send_queue.has(refIds[3])).toEqual(true);
+        expect(send_queue.has(refIds[3])).toBeTrue();
         expect(send_queue.get(refIds[3])).toEqual({
           id: refIds[3],
           siblings: null,
@@ -1503,7 +1592,7 @@ describe("Scripting", function () {
           name: "Keystroke",
           willCommit: true,
         });
-        expect(send_queue.has(refIds[3])).toEqual(true);
+        expect(send_queue.has(refIds[3])).toBeTrue();
         expect(send_queue.get(refIds[3])).toEqual({
           id: refIds[3],
           siblings: null,
@@ -1511,7 +1600,7 @@ describe("Scripting", function () {
           formattedValue: null,
         });
 
-        expect(send_queue.has(refIds[4])).toEqual(true);
+        expect(send_queue.has(refIds[4])).toBeTrue();
         expect(send_queue.get(refIds[4])).toEqual({
           id: refIds[4],
           siblings: null,
@@ -1551,7 +1640,7 @@ describe("Scripting", function () {
           selStart: 0,
           selEnd: 0,
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         send_queue.delete(refId);
 
         await sandbox.dispatchEventInSandbox({
@@ -1563,7 +1652,7 @@ describe("Scripting", function () {
           selStart: 1,
           selEnd: 1,
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         send_queue.delete(refId);
 
         await sandbox.dispatchEventInSandbox({
@@ -1575,7 +1664,7 @@ describe("Scripting", function () {
           selStart: 2,
           selEnd: 2,
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         send_queue.delete(refId);
 
         await sandbox.dispatchEventInSandbox({
@@ -1587,7 +1676,7 @@ describe("Scripting", function () {
           selStart: 3,
           selEnd: 3,
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           siblings: null,
@@ -1605,7 +1694,7 @@ describe("Scripting", function () {
           selStart: 3,
           selEnd: 3,
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         send_queue.delete(refId);
 
         await sandbox.dispatchEventInSandbox({
@@ -1616,7 +1705,7 @@ describe("Scripting", function () {
           selStart: 4,
           selEnd: 4,
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           siblings: null,
@@ -1663,7 +1752,7 @@ describe("Scripting", function () {
             selStart: i,
             selEnd: i,
           });
-          expect(send_queue.has(refId)).toEqual(true);
+          expect(send_queue.has(refId)).toBeTrue();
           send_queue.delete(refId);
           value += change;
         }
@@ -1677,7 +1766,7 @@ describe("Scripting", function () {
           selStart: i,
           selEnd: i,
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           siblings: null,
@@ -1724,7 +1813,7 @@ describe("Scripting", function () {
             selStart: i,
             selEnd: i,
           });
-          expect(send_queue.has(refId)).toEqual(true);
+          expect(send_queue.has(refId)).toBeTrue();
           send_queue.delete(refId);
           value += change;
         }
@@ -1738,7 +1827,7 @@ describe("Scripting", function () {
           selStart: i,
           selEnd: i,
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           siblings: null,
@@ -1785,7 +1874,7 @@ describe("Scripting", function () {
             selStart: i,
             selEnd: i,
           });
-          expect(send_queue.has(refId)).toEqual(true);
+          expect(send_queue.has(refId)).toBeTrue();
           send_queue.delete(refId);
           value += change;
         }
@@ -1799,7 +1888,7 @@ describe("Scripting", function () {
           selStart: i,
           selEnd: i,
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           siblings: null,
@@ -1846,7 +1935,7 @@ describe("Scripting", function () {
             selStart: i,
             selEnd: i,
           });
-          expect(send_queue.has(refId)).toEqual(true);
+          expect(send_queue.has(refId)).toBeTrue();
           send_queue.delete(refId);
           value += change;
         }
@@ -1860,7 +1949,7 @@ describe("Scripting", function () {
           selStart: i,
           selEnd: i,
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           siblings: null,
@@ -1907,7 +1996,7 @@ describe("Scripting", function () {
             selStart: i,
             selEnd: i,
           });
-          expect(send_queue.has(refId)).toEqual(true);
+          expect(send_queue.has(refId)).toBeTrue();
           send_queue.delete(refId);
           value += change;
         }
@@ -1921,7 +2010,7 @@ describe("Scripting", function () {
           selStart: i,
           selEnd: i,
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           siblings: null,
@@ -1968,7 +2057,7 @@ describe("Scripting", function () {
             selStart: i,
             selEnd: i,
           });
-          expect(send_queue.has(refId)).toEqual(true);
+          expect(send_queue.has(refId)).toBeTrue();
           send_queue.delete(refId);
           value += change;
         }
@@ -1982,7 +2071,7 @@ describe("Scripting", function () {
           selStart: i,
           selEnd: i,
         });
-        expect(send_queue.has(refId)).toEqual(true);
+        expect(send_queue.has(refId)).toBeTrue();
         expect(send_queue.get(refId)).toEqual({
           id: refId,
           siblings: null,
@@ -1997,20 +2086,20 @@ describe("Scripting", function () {
     describe("eMailValidate", function () {
       it("should validate an e-mail address", async () => {
         let value = await myeval(`eMailValidate(123)`);
-        expect(value).toEqual(false);
+        expect(value).toBeFalse();
 
         value = await myeval(`eMailValidate("foo@bar.com")`);
-        expect(value).toEqual(true);
+        expect(value).toBeTrue();
 
         value = await myeval(`eMailValidate("foo bar")`);
-        expect(value).toEqual(false);
+        expect(value).toBeFalse();
       });
     });
 
     describe("AFExactMatch", function () {
       it("should check matching between regexs and a string", async () => {
         let value = await myeval(`AFExactMatch(/\\d+/, "123")`);
-        expect(value).toEqual(true);
+        expect(value).toBeTrue();
 
         value = await myeval(`AFExactMatch(/\\d+/, "foo")`);
         expect(value).toEqual(0);

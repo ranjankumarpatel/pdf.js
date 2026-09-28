@@ -3,18 +3,24 @@ on:
   push:
     paths:
       - 'gulpfile.mjs'
+      - 'external/**'
+      - 'package-lock.json'
       - 'src/**'
       - 'test/test.mjs'
       - 'test/font/**'
+      - '.github/font_tests_requirements.txt'
       - '.github/workflows/font_tests.yml'
     branches:
       - master
   pull_request:
     paths:
       - 'gulpfile.mjs'
+      - 'external/**'
+      - 'package-lock.json'
       - 'src/**'
       - 'test/test.mjs'
       - 'test/font/**'
+      - '.github/font_tests_requirements.txt'
       - '.github/workflows/font_tests.yml'
     branches:
       - master
@@ -39,17 +45,19 @@ jobs:
             skip: --noFirefox
 
     runs-on: ${{ matrix.os }}
-    environment: code-coverage
+    environment:
+      name: code-coverage
+      deployment: false
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
@@ -58,7 +66,7 @@ jobs:
         run: npm ci
 
       - name: Use Python 3.14
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.0.2
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14'
           cache: 'pip'
@@ -71,7 +79,7 @@ jobs:
         run: npx gulp fonttest --headless --coverage --coverage-output build/coverage/font ${{ matrix.skip }}
 
       - name: Upload results to Codecov
-        uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
+        uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true

@@ -22,6 +22,7 @@ import {
   loadAndWait,
   PDI,
   showViewsManager,
+  waitForTooltipToBe,
 } from "./test_utils.mjs";
 
 function waitForThumbnailVisible(page, pageNum) {
@@ -70,13 +71,11 @@ describe("PDF Thumbnail View", () => {
             visible: true,
           });
 
-          const title = await page.$eval(
+          await waitForTooltipToBe(
+            page,
             getThumbnailSelector(1),
-            el => el.title
+            `Page ${FSI}1${PDI} of ${FSI}14${PDI}`
           );
-          expect(title)
-            .withContext(`In ${browserName}`)
-            .toBe(`Page ${FSI}1${PDI} of ${FSI}14${PDI}`);
         })
       );
     });
@@ -327,6 +326,80 @@ describe("PDF Thumbnail View", () => {
         })
       );
     });
+
+    it("must move to the previous item after pressing the End key", async () => {
+      await Promise.all(
+        pages.map(async ([browserName, page]) => {
+          await showViewsManager(page);
+          await waitForThumbnailVisible(page, 1);
+
+          await enableMenuItems(page);
+
+          await kbFocusNext(page, "#viewsManagerStatusActionButton");
+          await page.keyboard.press("Enter");
+          await waitForMenu(page, "#viewsManagerStatusActionButton");
+          await page.waitForSelector("#viewsManagerStatusActionCopy:focus", {
+            visible: true,
+          });
+
+          // Move to the second menu item.
+          await page.keyboard.press("ArrowDown");
+          await page.waitForSelector("#viewsManagerStatusActionCut:focus", {
+            visible: true,
+          });
+
+          // Jump to the last menu item.
+          await page.keyboard.press("End");
+          await page.waitForSelector("#viewsManagerStatusActionExport:focus", {
+            visible: true,
+          });
+
+          // The focus must move relative to the last menu item, and not
+          // relative to the item that was focused before pressing End.
+          await page.keyboard.press("ArrowUp");
+          await page.waitForSelector("#viewsManagerStatusActionDelete:focus", {
+            visible: true,
+          });
+        })
+      );
+    });
+
+    it("must move to the next item after pressing the Home key", async () => {
+      await Promise.all(
+        pages.map(async ([browserName, page]) => {
+          await showViewsManager(page);
+          await waitForThumbnailVisible(page, 1);
+
+          await enableMenuItems(page);
+
+          await kbFocusNext(page, "#viewsManagerStatusActionButton");
+          await page.keyboard.press("Enter");
+          await waitForMenu(page, "#viewsManagerStatusActionButton");
+          await page.waitForSelector("#viewsManagerStatusActionCopy:focus", {
+            visible: true,
+          });
+
+          // Wrap around to the last menu item.
+          await page.keyboard.press("ArrowUp");
+          await page.waitForSelector("#viewsManagerStatusActionExport:focus", {
+            visible: true,
+          });
+
+          // Jump to the first menu item.
+          await page.keyboard.press("Home");
+          await page.waitForSelector("#viewsManagerStatusActionCopy:focus", {
+            visible: true,
+          });
+
+          // The focus must move relative to the first menu item, and not
+          // relative to the item that was focused before pressing Home.
+          await page.keyboard.press("ArrowDown");
+          await page.waitForSelector("#viewsManagerStatusActionCut:focus", {
+            visible: true,
+          });
+        })
+      );
+    });
   });
 
   describe("Checkbox accessibility", () => {
@@ -352,13 +425,11 @@ describe("PDF Thumbnail View", () => {
           await showViewsManager(page);
           await waitForThumbnailVisible(page, 1);
 
-          const title = await page.$eval(
+          await waitForTooltipToBe(
+            page,
             `.thumbnail[page-number="1"] input[type="checkbox"]`,
-            el => el.title
+            `Select page ${FSI}1${PDI}`
           );
-          expect(title)
-            .withContext(`In ${browserName}`)
-            .toBe(`Select page ${FSI}1${PDI}`);
         })
       );
     });

@@ -13,8 +13,8 @@
  * limitations under the License.
  */
 
-import { assert, unreachable, warn } from "../shared/util.js";
-import { RefSet, RefSetCache } from "./primitives.js";
+import { assert, makeSet, unreachable, warn } from "../shared/util.js";
+import { RefMap, RefSet } from "./primitives.js";
 
 class BaseLocalCache {
   constructor(options) {
@@ -30,7 +30,7 @@ class BaseLocalCache {
       this._nameRefMap = new Map();
       this._imageMap = new Map();
     }
-    this._imageCache = new RefSetCache();
+    this._imageCache = new RefMap();
   }
 
   getByName(name) {
@@ -38,10 +38,7 @@ class BaseLocalCache {
       unreachable("Should not call `getByName` method.");
     }
     const ref = this._nameRefMap.get(name);
-    if (ref) {
-      return this.getByRef(ref);
-    }
-    return this._imageMap.get(name) || null;
+    return ref ? this.getByRef(ref) : this._imageMap.get(name) || null;
   }
 
   getByRef(ref) {
@@ -205,8 +202,8 @@ class GlobalImageCache {
         "GlobalImageCache - invalid NUM_PAGES_THRESHOLD constant."
       );
     }
-    this._refCache = new RefSetCache();
-    this._imageCache = new RefSetCache();
+    this._refCache = new RefMap();
+    this._imageCache = new RefMap();
   }
 
   get #byteSize() {
@@ -218,21 +215,14 @@ class GlobalImageCache {
   }
 
   get #cacheLimitReached() {
-    if (this._imageCache.size < GlobalImageCache.MIN_IMAGES_TO_CACHE) {
-      return false;
-    }
-    if (this.#byteSize < GlobalImageCache.MAX_BYTE_SIZE) {
-      return false;
-    }
-    return true;
+    return (
+      this._imageCache.size >= GlobalImageCache.MIN_IMAGES_TO_CACHE &&
+      this.#byteSize >= GlobalImageCache.MAX_BYTE_SIZE
+    );
   }
 
   shouldCache(ref, pageIndex) {
-    let pageIndexSet = this._refCache.get(ref);
-    if (!pageIndexSet) {
-      pageIndexSet = new Set();
-      this._refCache.put(ref, pageIndexSet);
-    }
+    const pageIndexSet = this._refCache.getOrPutComputed(ref, makeSet);
     pageIndexSet.add(pageIndex);
 
     if (pageIndexSet.size < GlobalImageCache.NUM_PAGES_THRESHOLD) {
@@ -268,10 +258,10 @@ class GlobalImageCache {
 
   getData(ref, pageIndex) {
     const pageIndexSet = this._refCache.get(ref);
-    if (!pageIndexSet) {
-      return null;
-    }
-    if (pageIndexSet.size < GlobalImageCache.NUM_PAGES_THRESHOLD) {
+    if (
+      !pageIndexSet ||
+      pageIndexSet.size < GlobalImageCache.NUM_PAGES_THRESHOLD
+    ) {
       return null;
     }
     const imageData = this._imageCache.get(ref);

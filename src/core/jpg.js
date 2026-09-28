@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-import { assert, BaseException, warn } from "../shared/util.js";
+import { BaseException, warn } from "../shared/util.js";
 import { ColorSpaceUtils } from "./colorspace_utils.js";
 import { DeviceCmykCS } from "./colorspace.js";
 import { grayToRGBA } from "../shared/image_utils.js";
@@ -221,10 +221,7 @@ function decodeScan(
       return readBit() === 1 ? 1 : -1;
     }
     const n = receive(length);
-    if (n >= 1 << (length - 1)) {
-      return n;
-    }
-    return n + (-1 << length) + 1;
+    return n >= 1 << (length - 1) ? n : n + (-1 << length) + 1;
   }
 
   function decodeBaseline(component, blockOffset) {
@@ -797,21 +794,27 @@ function skipData(data, view, offset) {
   const endOffset = offset + length - 2;
 
   const fileMarker = findNextFileMarker(data, view, endOffset, offset);
-  if (fileMarker?.invalid) {
-    return fileMarker.offset;
-  }
-  return endOffset;
+  return fileMarker?.invalid ? fileMarker.offset : endOffset;
 }
 
 class JpegImage {
-  constructor({ decodeTransform = null, colorTransform = -1 } = {}) {
-    this._decodeTransform = decodeTransform;
-    this._colorTransform = colorTransform;
+  constructor(options) {
+    this._colorTransform = options?.colorTransform ?? -1;
+
+    if (typeof PDFJSDev !== "undefined" && PDFJSDev.test("IMAGE_DECODERS")) {
+      this._decodeTransform = options?.decodeTransform || null;
+      this._isSourcePDF = false;
+    }
   }
 
   static canUseImageDecoder(data, colorTransform = -1) {
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-    let exifOffsets = null;
+    const info = {
+      width: 0,
+      height: 0,
+      exifStart: 0,
+      exifEnd: 0,
+    };
     let offset = 0;
     let numComponents = null;
     let fileMarker = view.getUint16(offset);
@@ -843,12 +846,13 @@ class JpegImage {
             appData[4] === 0 &&
             appData[5] === 0
           ) {
-            if (exifOffsets) {
+            if (info.exifStart) {
               throw new JpegError("Duplicate EXIF-blocks found.");
             }
             // Don't do the EXIF-block replacement here, see `JpegStream`,
             // since that can modify the original PDF document.
-            exifOffsets = { exifStart: oldOffset + 6, exifEnd: newOffset };
+            info.exifStart = oldOffset + 6;
+            info.exifEnd = newOffset;
           }
           fileMarker = view.getUint16(offset);
           offset += 2;
@@ -858,8 +862,8 @@ class JpegImage {
         case 0xffc2: // SOF2 (Start of Frame, Progressive DCT)
           // Skip marker length.
           // Skip precision.
-          // Skip scanLines.
-          // Skip samplesPerLine.
+          info.height = view.getUint16(offset + (2 + 1)); // scanLines
+          info.width = view.getUint16(offset + (2 + 1 + 2)); // samplesPerLine
           numComponents = data[offset + (2 + 1 + 2 + 2)];
           break markerLoop;
         case 0xffff: // Fill bytes
@@ -879,7 +883,8 @@ class JpegImage {
     if (numComponents === 3 && colorTransform === 0) {
       return null;
     }
-    return exifOffsets || {};
+    // A zero SOF height means that a later DNL marker defines it.
+    return info;
   }
 
   parse(data, { dnlScanLines = null } = {}) {
@@ -1046,7 +1051,7 @@ class JpegImage {
         case 0xffc4: // DHT (Define Huffman Tables)
           const huffmanLength = view.getUint16(offset);
           offset += 2;
-          for (i = 2; i < huffmanLength; ) {
+          for (i = 2; i < huffmanLength;) {
             const huffmanTableSpec = data[offset++];
             const codeLengths = new Uint8Array(16);
             let codeLengthSum = 0;
@@ -1203,15 +1208,13 @@ class JpegImage {
     return undefined;
   }
 
-  _getLinearizedBlockData(width, height, isSourcePDF = false) {
+  #getLinearizedBlockData(width, height) {
     const scaleX = this.width / width,
       scaleY = this.height / height;
 
     let component, componentScaleX, componentScaleY, blocksPerScanline;
     let x, y, i, j, k;
-    let index;
     let offset = 0;
-    let output;
     const numComponents = this.components.length;
     const dataLength = width * height * numComponents;
     const data = new Uint8ClampedArray(dataLength);
@@ -1224,7 +1227,7 @@ class JpegImage {
       componentScaleX = component.scaleX * scaleX;
       componentScaleY = component.scaleY * scaleY;
       offset = i;
-      output = component.output;
+      const output = component.output;
       blocksPerScanline = (component.blocksPerLine + 1) << 3;
       // Precalculate the `xScaleBlockOffset`. Since it doesn't depend on the
       // component data, that's only necessary when `componentScaleX` changes.
@@ -1238,7 +1241,7 @@ class JpegImage {
       // linearize the blocks of the component
       for (y = 0; y < height; y++) {
         j = 0 | (y * componentScaleY);
-        index = (blocksPerScanline * (j & mask3LSB)) | ((j & 7) << 3);
+        const index = (blocksPerScanline * (j & mask3LSB)) | ((j & 7) << 3);
         for (x = 0; x < width; x++) {
           data[offset] = output[index + xScaleBlockOffset[x]];
           offset += numComponents;
@@ -1246,28 +1249,32 @@ class JpegImage {
       }
     }
 
-    // decodeTransform contains pairs of multiplier (-256..256) and additive
-    let transform = this._decodeTransform;
+    if (typeof PDFJSDev !== "undefined" && PDFJSDev.test("IMAGE_DECODERS")) {
+      // decodeTransform contains pairs of multiplier (-256..256) and additive
+      let transform = this._decodeTransform;
 
-    // In PDF files, JPEG images with CMYK colour spaces are usually inverted
-    // (this can be observed by extracting the raw image data).
-    // Since the conversion algorithms (see below) were written primarily for
-    // the PDF use-cases, attempting to use `JpegImage` to parse standalone
-    // JPEG (CMYK) images may thus result in inverted images (see issue 9513).
-    //
-    // Unfortunately it's not (always) possible to tell, from the image data
-    // alone, if it needs to be inverted. Thus in an attempt to provide better
-    // out-of-box behaviour when `JpegImage` is used standalone, default to
-    // inverting JPEG (CMYK) images if and only if the image data does *not*
-    // come from a PDF file and no `decodeTransform` was passed by the user.
-    if (!isSourcePDF && numComponents === 4 && !transform) {
-      transform = new Int32Array([-256, 255, -256, 255, -256, 255, -256, 255]);
-    }
+      // In PDF files, JPEG images with CMYK colour spaces are usually inverted
+      // (this can be observed by extracting the raw image data).
+      // Since the conversion algorithms (see below) were written primarily for
+      // the PDF use-cases, attempting to use `JpegImage` to parse standalone
+      // JPEG (CMYK) images may thus result in inverted images (see issue 9513).
+      //
+      // Unfortunately it's not (always) possible to tell, from the image data
+      // alone, if it needs to be inverted. Thus in an attempt to provide better
+      // out-of-the-box behaviour when `JpegImage` is used standalone, default
+      // to inverting JPEG (CMYK) images if and only if the image data does
+      // *not* come from a PDF file and no `decodeTransform` was provided.
+      if (!this._isSourcePDF && numComponents === 4) {
+        transform ||= new Int32Array([
+          -256, 255, -256, 255, -256, 255, -256, 255,
+        ]);
+      }
 
-    if (transform) {
-      for (i = 0; i < dataLength; ) {
-        for (j = 0, k = 0; j < numComponents; j++, i++, k += 2) {
-          data[i] = ((data[i] * transform[k]) >> 8) + transform[k + 1];
+      if (transform) {
+        for (i = 0; i < dataLength;) {
+          for (j = 0, k = 0; j < numComponents; j++, i++, k += 2) {
+            data[i] = ((data[i] * transform[k]) >> 8) + transform[k + 1];
+          }
         }
       }
     }
@@ -1308,7 +1315,7 @@ class JpegImage {
 
   _convertYccToRgb(data) {
     let Y, Cb, Cr;
-    for (let i = 0, length = data.length; i < length; i += 3) {
+    for (let i = 0, ii = data.length; i < ii; i += 3) {
       Y = data[i];
       Cb = data[i + 1];
       Cr = data[i + 2];
@@ -1320,7 +1327,7 @@ class JpegImage {
   }
 
   _convertYccToRgba(data, out) {
-    for (let i = 0, j = 0, length = data.length; i < length; i += 3, j += 4) {
+    for (let i = 0, j = 0, ii = data.length; i < ii; i += 3, j += 4) {
       const Y = data[i];
       const Cb = data[i + 1];
       const Cr = data[i + 2];
@@ -1344,7 +1351,7 @@ class JpegImage {
 
   _convertYcckToCmyk(data) {
     let Y, Cb, Cr;
-    for (let i = 0, length = data.length; i < length; i += 4) {
+    for (let i = 0, ii = data.length; i < ii; i += 4) {
       Y = data[i];
       Cb = data[i + 1];
       Cr = data[i + 2];
@@ -1374,32 +1381,23 @@ class JpegImage {
     return data;
   }
 
-  getData({
-    width,
-    height,
-    forceRGBA = false,
-    forceRGB = false,
-    isSourcePDF = false,
-  }) {
-    if (typeof PDFJSDev === "undefined" || PDFJSDev.test("TESTING")) {
-      assert(
-        isSourcePDF === true,
-        'JpegImage.getData: Unexpected "isSourcePDF" value for PDF files.'
-      );
-    }
+  getData({ width, height, forceRGBA = false, forceRGB = false }) {
     if (this.numComponents > 4) {
       throw new JpegError("Unsupported color mode");
     }
+    if (typeof PDFJSDev !== "undefined" && PDFJSDev.test("IMAGE_DECODERS")) {
+      this._isSourcePDF = arguments[0]?.isSourcePDF === true;
+    }
     // Type of data: Uint8ClampedArray(width * height * numComponents)
-    const data = this._getLinearizedBlockData(width, height, isSourcePDF);
+    const data = this.#getLinearizedBlockData(width, height);
 
     if (this.numComponents === 1 && (forceRGBA || forceRGB)) {
       const len = data.length * (forceRGBA ? 4 : 3);
       const rgbaData = new Uint8ClampedArray(len);
-      let offset = 0;
       if (forceRGBA) {
         grayToRGBA(data, new Uint32Array(rgbaData.buffer));
       } else {
+        let offset = 0;
         for (const grayColor of data) {
           rgbaData[offset++] = grayColor;
           rgbaData[offset++] = grayColor;
@@ -1418,10 +1416,9 @@ class JpegImage {
         if (forceRGBA) {
           return this._convertYcckToRgba(data);
         }
-        if (forceRGB) {
-          return this._convertYcckToRgb(data);
-        }
-        return this._convertYcckToCmyk(data);
+        return forceRGB
+          ? this._convertYcckToRgb(data)
+          : this._convertYcckToCmyk(data);
       } else if (forceRGBA) {
         return this._convertCmykToRgba(data);
       } else if (forceRGB) {

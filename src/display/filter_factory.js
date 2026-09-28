@@ -14,6 +14,12 @@
  */
 
 import {
+  computeLuminance,
+  getRGB,
+  getRGBA,
+  isDataScheme,
+} from "./display_utils.js";
+import {
   FeatureTest,
   SVG_NS,
   unreachable,
@@ -21,7 +27,6 @@ import {
   Util,
   warn,
 } from "../shared/util.js";
-import { getRGB, getRGBA, isDataScheme } from "./display_utils.js";
 
 class BaseFilterFactory {
   constructor() {
@@ -59,7 +64,6 @@ class BaseFilterFactory {
 
   /**
    * Create a filter for the selection of text, given colors.
-   *
    * @param {string} fgColor
    * @param {string} bgColor
    * @returns {string}
@@ -70,7 +74,6 @@ class BaseFilterFactory {
 
   /**
    * Create a filter for the selection of text.
-   *
    * @returns {string}
    */
   addSelectionFilter() {
@@ -78,7 +81,7 @@ class BaseFilterFactory {
   }
 
   /**
-   * @param {Object} [pageColors]
+   * @param {object} [pageColors]
    * @param {string} [pageColors.background]
    * @param {string} [pageColors.foreground]
    * @returns {Record<string, string> | null}
@@ -154,27 +157,14 @@ class DOMFilterFactory extends BaseFilterFactory {
   }
 
   #createTables(maps) {
+    // A `null` map is an /Identity entry, no feFunc is needed for it.
+    const toTable = map => map && Array.from(map, v => v / 255).join(",");
     if (maps.length === 1) {
-      const mapR = maps[0];
-      const buffer = new Array(256);
-      for (let i = 0; i < 256; i++) {
-        buffer[i] = mapR[i] / 255;
-      }
-
-      const table = buffer.join(",");
+      const table = toTable(maps[0]);
       return [table, table, table];
     }
-
     const [mapR, mapG, mapB] = maps;
-    const bufferR = new Array(256);
-    const bufferG = new Array(256);
-    const bufferB = new Array(256);
-    for (let i = 0; i < 256; i++) {
-      bufferR[i] = mapR[i] / 255;
-      bufferG[i] = mapG[i] / 255;
-      bufferB[i] = mapB[i] / 255;
-    }
-    return [bufferR.join(","), bufferG.join(","), bufferB.join(",")];
+    return [toTable(mapR), toTable(mapG), toTable(mapB)];
   }
 
   #createUrl(id) {
@@ -259,7 +249,7 @@ class DOMFilterFactory extends BaseFilterFactory {
     fgColor = Util.makeHexColor(...fgRGB);
     const bgRGB = this.#getRGB(bgColor);
     bgColor = Util.makeHexColor(...bgRGB);
-    this.#defs.style.color = "";
+    this.#resetDefsColor();
 
     if (
       (fgColor === "#000000" && bgColor === "#ffffff") ||
@@ -277,11 +267,9 @@ class DOMFilterFactory extends BaseFilterFactory {
     // Then for every color in the pdf, if its rounded luminance is the
     // same as the background one then it's replaced by the new
     // background color else by the foreground one.
-    const map = new Array(256);
-    for (let i = 0; i <= 255; i++) {
-      const x = i / 255;
-      map[i] = x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
-    }
+    const map = Array.from({ length: 256 }, (_, i) =>
+      computeLuminance(i / 255)
+    );
     const table = map.join(",");
 
     const id = `g_${this.#docId}_hcm_filter`;
@@ -311,7 +299,6 @@ class DOMFilterFactory extends BaseFilterFactory {
 
   /**
    * Create a filter for the selection of text, given colors.
-   *
    * @param {string} fgColor
    * @param {string} bgColor
    * @returns {string}
@@ -329,9 +316,6 @@ class DOMFilterFactory extends BaseFilterFactory {
 
   /**
    * Create a filter for the selection of text.
-   *
-   * @param {string} fgColor
-   * @param {string} bgColor
    * @returns {string}
    */
   addSelectionFilter() {
@@ -345,7 +329,7 @@ class DOMFilterFactory extends BaseFilterFactory {
   }
 
   /**
-   * @param {Object} [pageColors]
+   * @param {object} [pageColors]
    * @param {string} [pageColors.background]
    * @param {string} [pageColors.foreground]
    * @returns {Record<string, string> | null}
@@ -507,7 +491,7 @@ class DOMFilterFactory extends BaseFilterFactory {
         newFgRGB,
       ];
     }
-    this.#defs.style.color = "";
+    this.#resetDefsColor();
 
     // Now we can create the filters to highlight some canvas parts.
     // The colors in the pdf will almost be Canvas and CanvasText, hence we
@@ -609,6 +593,9 @@ class DOMFilterFactory extends BaseFilterFactory {
   }
 
   #appendFeFunc(feComponentTransfer, func, table) {
+    if (!table) {
+      return;
+    }
     const feFunc = this.#document.createElementNS(SVG_NS, func);
     feFunc.setAttribute("type", "discrete");
     feFunc.setAttribute("tableValues", table);
@@ -635,14 +622,8 @@ class DOMFilterFactory extends BaseFilterFactory {
     this.#appendFeFunc(feComponentTransfer, "feFuncA", aTable);
   }
 
-  #getRGB(color) {
-    this.#defs.style.color = color;
-    return getRGB(getComputedStyle(this.#defs).getPropertyValue("color"));
-  }
-
   /**
-   * Get the RGBA channels of a color.
-   *
+   * Get the RGB channels of a color.
    * @param {string} color
    *   Color in any valid CSS format (such as `x` in `color: x`).
    * @returns {[number, number, number, number]}
@@ -650,15 +631,36 @@ class DOMFilterFactory extends BaseFilterFactory {
    *   the RGB channels are in the range `[0, 255]`;
    *   the alpha channel is in the range `[0, 1]`.
    */
+  #getRGB(color) {
+    // Some colors on some OSes (e.g. HighlightText in Firefox on macOS)
+    // are affected by the current text color. Ensure consistent behavior by
+    // setting it to CanvasText.
+    this.#defs.style.color = "CanvasText";
+    this.#defs.style.backgroundColor = color;
+    return getRGB(
+      getComputedStyle(this.#defs).getPropertyValue("background-color")
+    );
+  }
+
   #getRGBA(color) {
-    this.#defs.style.color = color;
-    return getRGBA(getComputedStyle(this.#defs).getPropertyValue("color"));
+    // Some colors on some OSes (e.g. HighlightText in Firefox on macOS)
+    // are affected by the current text color. Ensure consistent behavior by
+    // setting it to CanvasText.
+    this.#defs.style.color = "CanvasText";
+    this.#defs.style.backgroundColor = color;
+    return getRGBA(
+      getComputedStyle(this.#defs).getPropertyValue("background-color")
+    );
+  }
+
+  #resetDefsColor() {
+    this.#defs.style.color = "";
+    this.#defs.style.backgroundColor = "";
   }
 
   /**
    * Get the opaque text color by, if it has an alpha layer, blending it with
    * the `Canvas` background.
-   *
    * @param {string} color
    *   Color in any valid CSS format (such as `x` in `color: x`).
    * @returns {[number, number, number]}
@@ -683,7 +685,6 @@ class DOMFilterFactory extends BaseFilterFactory {
 
 /**
  * Blend a foreground color with a background color using the alpha value.
- *
  * @param {number} fg
  *   Foreground color channel value in the range `[0, 255]`.
  * @param {number} bg

@@ -38,7 +38,7 @@ const SWIPE_MIN_DISTANCE_THRESHOLD = 50;
 const SWIPE_ANGLE_THRESHOLD = Math.PI / 6;
 
 /**
- * @typedef {Object} PDFPresentationModeOptions
+ * @typedef {object} PDFPresentationModeOptions
  * @property {HTMLDivElement} container - The container for the viewer element.
  * @property {PDFViewer} pdfViewer - The document viewer.
  * @property {EventBus} eventBus - The application event bus.
@@ -123,7 +123,7 @@ class PDFPresentationMode {
   }
 
   #mouseWheel(evt) {
-    if (!this.active) {
+    if (!this.active || evt.target.closest?.(".mediaAnnotation")) {
       return;
     }
     evt.preventDefault();
@@ -246,6 +246,10 @@ class PDFPresentationMode {
     ) {
       return;
     }
+    // Allow interacting with embedded media controls rather than advancing.
+    if (evt.target.closest?.(".mediaAnnotation")) {
+      return;
+    }
     // Unless an internal link was clicked, advance one page.
     evt.preventDefault();
 
@@ -291,6 +295,10 @@ class PDFPresentationMode {
 
   #touchSwipe(evt) {
     if (!this.active) {
+      return;
+    }
+    if (evt.target.closest?.(".mediaAnnotation")) {
+      this.touchSwipeState = null;
       return;
     }
     if (evt.touches.length > 1) {

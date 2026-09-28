@@ -71,6 +71,24 @@ function getViewerConfiguration() {
       editorSignatureParamsToolbar: document.getElementById(
         "editorSignatureParamsToolbar"
       ),
+      signaturePropertiesButton: document.getElementById(
+        "signaturePropertiesButton"
+      ),
+      signaturePropertiesPanel: document.getElementById(
+        "signaturePropertiesPanel"
+      ),
+      signaturePropertiesContainer: document.getElementById(
+        "signaturePropertiesContainer"
+      ),
+      signaturePropertiesBanner: document.getElementById(
+        "signaturePropertiesBanner"
+      ),
+      signaturePropertiesList: document.getElementById(
+        "signaturePropertiesList"
+      ),
+      signaturePropertiesSeparator: document.getElementById(
+        "signaturePropertiesSeparator"
+      ),
       download: document.getElementById("downloadButton"),
     },
     secondaryToolbar: {
@@ -334,6 +352,14 @@ function getViewerConfiguration() {
       undoButton: document.getElementById("editorUndoBarUndoButton"),
       closeButton: document.getElementById("editorUndoBarCloseButton"),
     },
+    ...(typeof PDFJSDev === "undefined" ||
+    PDFJSDev.test("MOZCENTRAL && !GECKOVIEW")
+      ? {
+          featuresNotification: document.getElementById(
+            "pdfFeaturesNotification"
+          ),
+        }
+      : {}),
     editCommentDialog: {
       dialog: document.getElementById("commentManagerDialog"),
       toolbar: document.getElementById("commentManagerToolbar"),
